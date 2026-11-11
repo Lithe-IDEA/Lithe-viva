@@ -52,6 +52,29 @@ func Menu(c C, anchor Box, open *bool, body func(*MenuItems)) {
 	p.declareMenu(c, menu, scope, open, anchor.i, body)
 }
 
+// MenuAt shows the items body declares at the point x, y of the window while *open,
+// as a ContextMenu looks and behaves: for a menu the application opens itself at a
+// place no control stands for, such as a mark painted inside a custom-drawn view.
+// Choosing an item, Escape or a press outside closes it.
+//
+//	if pressed := m.markAt(event); pressed {
+//		m.lanes, m.lanesAt = true, ui.Rect{X: event.X, Y: event.Y}
+//	}
+//	ui.MenuAt(c, m.lanesAt.X, m.lanesAt.Y, &m.lanes, func(menu *ui.MenuItems) { ... })
+//
+// Not inside a Memo.
+func MenuAt(c C, x, y float32, open *bool, body func(*MenuItems)) {
+	p := c.page
+	p.forbidInMemo("MenuAt")
+	if !*open {
+		return
+	}
+	scope := p.boundScope(pkMenu, unsafe.Pointer(open))
+	menu := stateIn[MenuItems](p, scope, "menu")
+	menu.context, menu.at = true, Rect{X: x, Y: y}
+	p.declareMenu(c, menu, scope, open, -1, body)
+}
+
 // ContextMenu shows the items body declares at the pointer when target is pressed
 // with the secondary button, or at the target when it has the focus and Shift+F10
 // is pressed, as shadcn's ContextMenu. It behaves as a Menu then, but Tab does not
