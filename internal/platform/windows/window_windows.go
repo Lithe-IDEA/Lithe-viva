@@ -67,6 +67,8 @@ const (
 )
 
 type windowState struct {
+	// pendingTitle is the title SetTitle asked for, applied on the window thread.
+	pendingTitle        titleRequest
 	fullscreen          atomic.Bool
 	fullscreenChanging  bool
 	fullscreenStyle     uint32
@@ -432,6 +434,9 @@ func windowProc(window, kind, first, second uintptr) (result uintptr) {
 		return 0
 	case wmFullscreen:
 		state.setFullscreen(first != 0)
+		return 0
+	case wmSetTitle:
+		state.applyTitle()
 		return 0
 	case wmSysCommand:
 		if state.fullscreen.Load() {

@@ -5702,6 +5702,7 @@ static void viva_set_secure_event_input(BOOL on) {
 - (void)hideWindow;
 - (void)showWindow;
 - (void)setFullscreen:(BOOL)fullscreen;
+- (void)setWindowTitle:(NSString *)title;
 - (void)setAlwaysOnTop:(BOOL)enabled;
 - (BOOL)isFullscreen;
 - (void)reopenWindow;
@@ -6242,6 +6243,14 @@ static void viva_set_secure_event_input(BOOL on) {
 
 - (BOOL)isFullscreen {
     return (_window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
+
+- (void)setWindowTitle:(NSString *)title {
+    [_title release];
+    _title = [title copy];
+    if (_window != nil) {
+        _window.title = _title;
+    }
 }
 
 - (void)setFullscreen:(BOOL)fullscreen {
@@ -6957,6 +6966,28 @@ int viva_application_set_fullscreen(void *window, int fullscreen) {
     } else {
         dispatch_sync(dispatch_get_main_queue(), work);
     }
+    return found;
+}
+
+int viva_application_set_title(void *window, const char *title) {
+    __block int found = 0;
+    NSString *value = [[NSString alloc] initWithUTF8String:title != NULL ? title : ""];
+    if (value == nil) {
+        value = [@"" retain];
+    }
+    void (^work)(void) = ^{
+        VivaAppDelegate *delegate = viva_find_window(window);
+        if (delegate != nil) {
+            found = 1;
+            [delegate setWindowTitle:value];
+        }
+    };
+    if ([NSThread isMainThread]) {
+        work();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), work);
+    }
+    [value release];
     return found;
 }
 
