@@ -6250,6 +6250,12 @@ static void viva_set_secure_event_input(BOOL on) {
     _title = [title copy];
     if (_window != nil) {
         _window.title = _title;
+        /* A new title lays the titlebar out again, and AppKit sets the zoom
+         * button back at the system's height without reporting the move as a
+         * frame change, so keepTrafficLightsCentered never hears of it. */
+        if (_windowMode == VIVA_WINDOW_CUSTOM_TITLEBAR) {
+            viva_place_traffic_lights(_window, _titlebarHeight);
+        }
     }
 }
 
