@@ -876,7 +876,8 @@ func (p *Page) listArea(c C, state *ListState, n int, horizontal bool, row func(
 		scroll.Offset = max(state.top(n)-viewport, 0)
 	}
 	// The rows are placed and hit-tested on whole logical pixels, as the layout
-	// applies them, so a label's native texture survives a fractional scroll.
+	// applies them, so a label's native texture survives a fractional scroll. The node
+	// carries that offset, so the paint that adds the rows shows the requested end.
 	offset := snapScroll(scroll.Offset)
 	c.f.nodes[area.i].scroll = offset
 	first := max(state.rowAt(offset)-listOverscan, 0)

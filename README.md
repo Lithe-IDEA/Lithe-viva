@@ -100,6 +100,8 @@ WebView and no bundled rendering runtime.
   by the application.
 - Native fullscreen through `Window.SetFullscreen`, with `Config.OnFullscreen`
   reporting system transitions and restoring normal window placement on exit.
+- `Window.SetTitle` changes a window's title after it opens: the system title
+  bar, the task switcher and the taskbar or Dock window list.
 - Explicit multi-window applications through `app.RunApplication`: every
   window owns independent retained paint, focus, input, text, invalidation, and
   close state, and the native loop exits after the final window closes.
