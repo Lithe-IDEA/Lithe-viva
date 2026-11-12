@@ -97,6 +97,8 @@ func (m *model) page(c ui.C) {
   `Viewport`, `Max()`, `Pinned()`, `ScrollTo(px)` and `ScrollToEnd()` (also for the area a `ui.List` or `ui.Tree` returns); ask for it
   in each paint and do not keep the pointer. `.Sideways()` scrolls left and right too (`OffsetX`, `ContentWidth`, `ViewportWidth`,
   `MaxX()` and `ScrollToX(px)`), and `.Scrollbars()` draws draggable bars over the overflowing edges.
+  `.Bars(components.ScrollBarStyle{Size, HoverSize, Inset, MinThumb})` gives those bars your own geometry; the zero style
+  keeps Viva's, so set only the fields your product changes.
 - `ui.Choice` (a segmented single choice) and `ui.Tabs` are one tab stop each; the arrow keys, Home and End move to an
   option and choose it, so do not wire `components.SegmentedControlKeyDown` or `TabsKeyDown` yourself.
 - A tree: keep a `ui.TreeState` with `Node` describing each visible row, `ui.Tree(c, &m.tree, n, label, nil)`,
