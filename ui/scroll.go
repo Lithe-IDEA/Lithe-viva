@@ -255,6 +255,7 @@ func (f *frame) ScrollArea(id gfx.ID) Box {
 	}
 	state := f.scrolls.get(id)
 	state.id, state.follow, state.sideways, state.bars = id, false, false, false
+	state.barStyle = f.barStyle
 	b := f.Scroll(state.Offset)
 	f.extra(b.i).scrollState = state
 	return b
