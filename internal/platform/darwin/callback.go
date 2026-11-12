@@ -40,6 +40,13 @@ func vivaShapedLineStyle(utf8 *C.uchar, length C.size_t, size, weight C.double, 
 	return sharedTextEngine().retainedLineStyle(value, float32(size), float32(weight), italic != 0)
 }
 
+//export vivaOpenFile
+func vivaOpenFile(path *C.char) {
+	if path != nil {
+		deliverOpenFile(C.GoString(path))
+	}
+}
+
 //export vivaPointerEvent
 func vivaPointerEvent(
 	handle C.uintptr_t,
@@ -270,6 +277,16 @@ func runStateFor(handle C.uintptr_t) (state *runState, ok bool) {
 //export vivaTerminalCells
 func vivaTerminalCells(character C.uint32_t) C.int {
 	return C.int(platform.TerminalPreeditCells(rune(character)))
+}
+
+// vivaWindowActivated reports that the window became the key window.
+//
+//export vivaWindowActivated
+func vivaWindowActivated(handle C.uintptr_t) {
+	state, ok := runStateFor(handle)
+	if ok && !state.closed && state.onActivate != nil {
+		state.onActivate()
+	}
 }
 
 // vivaFocusLost reports that the window stopped being the keyboard window.

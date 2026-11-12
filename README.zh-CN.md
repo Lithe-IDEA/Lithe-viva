@@ -34,7 +34,7 @@ viva dev .        # hot reload: save a file, the window updates and keeps its st
 
 环境要求：Go 1.26 或更新版本（缺失时 viva 会自己下载）。macOS 上需要 Xcode 命令行工具，因为 Viva 通过 cgo 访问 Cocoa 和 Metal；Linux 上需要带系统 XCB 和 Vulkan 加载库的 X11；Windows 上需要 Win32、Direct3D 11 和 DirectWrite。Viva 在运行时加载系统库，自身不捆绑任何一个。
 
-当前版本是 `v0.5.1`；要固定版本就写明（`@v0.5.1`）。指南、API 参考和带实时预览的组件目录在 [`website/`](website/) 里，本地用 `npm run dev` 运行；也已经发布在 [vivaui.dev](https://vivaui.dev/zh/)。
+当前版本是 `v0.6.0`；要固定版本就写明（`@v0.6.0`）。指南、API 参考和带实时预览的组件目录在 [`website/`](website/) 里，本地用 `npm run dev` 运行；也已经发布在 [vivaui.dev](https://vivaui.dev/zh/)。
 
 下面的一切描述的都是这个仓库：它的测量、它自己的程序，以及如何开发框架本身，而不是如何用框架。
 
@@ -72,7 +72,7 @@ Viva 面向 macOS、Windows 和 Linux 上的原生桌面应用，同时把 WebAs
 - 一棵独立的保留式语义无障碍树。
 - 直接 CoreText 整形、系统字体回退、GPU 合成的文本纹理，以及有上限的测量缓存。
 - 实验性的 Windows shell：Win32 事件、D3D11 保留式渲染、内嵌 DXBC 着色器、DirectWrite 测量，以及有上限的 GDI 标签纹理；原生构建不加载着色器编译器。
-- 实验性的 Linux/X11 shell：动态加载系统 XCB、Vulkan、Pango 和 Cairo；保留式圆角矩形与三角形、分层 GPU 合成的系统文本、指针与键盘输入、自定义标题栏拖动，以及没有空闲重绘的阻塞式事件循环。
+- 实验性的 Linux/X11 shell：动态加载系统 XCB、Vulkan、Pango 和 Cairo；保留式圆角矩形与三角形、分层 GPU 合成的系统文本、指针与键盘输入、自定义标题栏拖动、没有空闲重绘的阻塞式事件循环，以及在没有硬件 Vulkan 设备时用 CPU 光栅器绘制窗口。
 - 事件驱动渲染，没有空闲帧循环。
 - 主题令牌，以及把固定版本的 shadcn 组件目录静态类型化、源码自有的移植，包括表单、浮层、菜单、日历、滚动配方、反馈界面，以及从有类型切片绘制的面积图、折线图和柱状图，不需要浏览器运行时、反射或运行时样式解析器。
 - 共享的原生/WASM 组件浏览器：按分类分组的全部组件目录，以及每个组件一页、并排运行它的所有示例（点击、悬停、键盘、拖动、滚轮和原生文本编辑都可用），页面滚动条可拖动，热重载保留状态。示例就是 `internal/componentdemo` 里的那些，通过 `gfx.Canvas.Embed` 嵌入页面，所以组件浏览器不保留任何组件的副本。

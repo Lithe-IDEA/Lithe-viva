@@ -404,6 +404,7 @@ extern void vivaRawKeyEvent(
 // vivaTerminalCells is how many terminal cells a character occupies, answered by the
 // terminal's own table in Go.
 extern int vivaTerminalCells(uint32_t character);
+extern void vivaWindowActivated(uintptr_t callbackHandle);
 extern void vivaFocusLost(
     uintptr_t callbackHandle,
     void *view
@@ -436,6 +437,7 @@ extern int vivaShortcutEvent(
 // phase: 0 over, 1 leave, 2 drop. paths is the dropped paths joined by NUL, with
 // length bytes; the result is nonzero when the point takes files.
 extern void vivaOpenURL(const char *url);
+extern void vivaOpenFile(const char *path);
 extern int vivaApplicationQuitRequested(void);
 extern int vivaApplicationReopenRequested(void);
 extern int vivaFileDropEvent(
@@ -4679,6 +4681,10 @@ static void viva_set_secure_event_input(BOOL on) {
 
 - (void)keyWindowChanged:(NSNotification *)notification {
     [self syncSecureEventInput];
+    if ([notification.name isEqualToString:NSWindowDidBecomeKeyNotification] &&
+        notification.object == self.window && _callbackHandle != 0) {
+        vivaWindowActivated(_callbackHandle);
+    }
     // The keys that were down will be released to whichever window has the
     // keyboard now, so the application must let go of them here.
     if ([notification.name isEqualToString:NSWindowDidResignKeyNotification] &&
@@ -6571,6 +6577,29 @@ static void viva_reset_profile_counters(void) {
             vivaOpenURL(text);
         }
     }
+}
+
+/* Documents the system opened this application with, for the file types the
+ * bundle registers. AppKit sends one file to openFile and a batch to openFiles. */
+- (BOOL)application:(NSApplication *)application openFile:(NSString *)filename {
+    (void)application;
+    const char *text = filename.UTF8String;
+    if (text == NULL) {
+        return NO;
+    }
+    vivaOpenFile(text);
+    return YES;
+}
+
+- (void)application:(NSApplication *)application openFiles:(NSArray<NSString *> *)filenames {
+    (void)application;
+    for (NSString *path in filenames) {
+        const char *text = path.UTF8String;
+        if (text != NULL) {
+            vivaOpenFile(text);
+        }
+    }
+    [NSApp replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 @end
 

@@ -87,6 +87,10 @@ type Config struct {
 	// every other key is delivered as it was.
 	ModifierTaps bool
 	OnShortcut   ShortcutHandler
+	// OnActivate, when set, runs on the window thread when the top-level
+	// window becomes the active window. Focus moving between views inside the
+	// window does not call it.
+	OnActivate func()
 	// OnFocusLost, when set, runs when the window stops being the one the
 	// keyboard types into (another window or application took the focus), so
 	// the runtime can release the keys that were down: their releases will go
@@ -102,6 +106,13 @@ type Config struct {
 	// event-loop thread and presents the frames it hands back.
 	OnAccessibility AccessibilityHandler
 	OnRedraw        RedrawHandler
+	// SetFrameInterval, when set, is called by the adapter on the window thread
+	// once it knows how the window's frames are paced: the interval between
+	// display frames, or zero when presenting a frame blocks until the display
+	// takes it. The runtime starts with 1/120 s and uses zero to ask for the
+	// next frame as soon as the last one is presented. Adapters that present
+	// without blocking must report their display interval instead.
+	SetFrameInterval func(interval time.Duration)
 	// Waker, when set together with OnRedraw, lets the runtime request one
 	// redraw from any goroutine without a parked reader goroutine.
 	Waker          *Waker
@@ -202,10 +213,11 @@ var (
 )
 
 // ErrNoGraphics is returned by OpenWindow (wrapped, with what to install) when the
-// machine has no graphics driver to draw a window with: no Vulkan on Linux, no
-// Direct3D 11 device, not even the software one, on Windows. A cloud server with
-// no GPU is the usual case, and it still runs with a software driver; a server with
-// no display at all needs the headless build instead.
+// machine has no graphics driver to draw a window with and the platform's CPU
+// fallback cannot draw either: no Direct3D 11 device, not even the software one, on
+// Windows, or a Linux machine whose CPU rasterizer cannot start. Linux without a
+// usable Vulkan driver draws the window with the CPU rasterizer and does not return
+// this. A cloud server with no display at all needs the headless build instead.
 var ErrNoGraphics = errors.New("platform: no graphics driver")
 
 // ErrFullscreenUnsupported means this host or window kind cannot go fullscreen.

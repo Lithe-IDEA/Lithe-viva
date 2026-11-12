@@ -21,7 +21,7 @@ func openFramedWindow(t *testing.T, config platform.Config) (*linuxApplication, 
 	application := &linuxApplication{}
 	opened, err := application.OpenWindow(config)
 	if errors.Is(err, platform.ErrNoGraphics) {
-		t.Skipf("no Vulkan device: %v", err)
+		t.Skipf("no graphics device: %v", err)
 	}
 	if err != nil {
 		t.Skipf("no window: %v", err)
@@ -120,8 +120,8 @@ func TestFramedWindowKeepsItsContentWhenTheScaleChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	win := state.win
-	if win.margin != frameMargin(2) || state.renderer.frame.margin != frameMargin(2) {
-		t.Fatalf("margin %d (renderer %d), want %d at 2x", win.margin, state.renderer.frame.margin, frameMargin(2))
+	if win.margin != frameMargin(2) || state.renderer.frameMargin() != frameMargin(2) {
+		t.Fatalf("margin %d (renderer %d), want %d at 2x", win.margin, state.renderer.frameMargin(), frameMargin(2))
 	}
 	if size := win.logicalSize(); size.Scale != 2 {
 		t.Fatalf("scale %v", size.Scale)

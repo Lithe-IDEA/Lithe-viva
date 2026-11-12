@@ -50,7 +50,7 @@ func commands() []command {
 				"and the Homebrew build on Apple Silicon crashes, so build it on Linux or Windows), --target linux a\n" +
 				"tar.gz with an install script or a .deb (tar.gz, deb). --program packages an executable you built\n" +
 				"(or signed) yourself instead of building one. [app] url_schemes and [[app.file_types]] (name, extensions,\n" +
-				"optional mime) register the links and documents the program opens with every format; on Windows and\n" +
+				"optional mime and macOS uti) register the links and documents the program opens with every format; on Windows and\n" +
 				"Linux they arrive as arguments of a new process (app/singleinstance hands them to the running copy).\n" +
 				"macOS signing and notarization are optional and off unless an identity is given: --sign-identity or\n" +
 				"$APPLE_SIGNING_IDENTITY (\"-\" signs ad hoc, for this Mac only), $APPLE_CERTIFICATE and\n" +
@@ -62,7 +62,8 @@ func commands() []command {
 				"Windows), timestamped by $WINDOWS_TIMESTAMP_URL; --sign-command or $WINDOWS_SIGN_COMMAND names a command\n" +
 				"that signs {file} in place, for keys in a token or a signing service. A program given with --program\n" +
 				"is used as it is. --no-sign skips all signing. Unsigned, macOS blocks a downloaded bundle and Windows\n" +
-				"SmartScreen warns about the installer; Linux packages are not signed.",
+				"SmartScreen warns about the installer; Linux packages are not signed. On Windows, --file SRC=DEST\n" +
+				"(repeatable) ships SRC beside the program at the relative DEST, in both the installer and the zip.",
 			run: func(arguments []string, output, errorOutput io.Writer) error {
 				return runPackage(arguments, output, errorOutput)
 			}},

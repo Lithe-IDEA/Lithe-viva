@@ -158,6 +158,7 @@ type runState struct {
 	visibilityHandler platform.VisibilityHandler
 	fullscreenHandler func(bool)
 	onReopen          func()
+	onActivate        func()
 	keyHandler        KeyHandler
 	focusLostHandler  platform.FocusLostHandler
 	accessibility     platform.AccessibilityHandler
@@ -356,7 +357,7 @@ func (application *nativeApplication) OpenWindow(config Config) (platform.Window
 	}
 
 	state := &runState{application: application, onClosed: config.OnClosed, waker: config.Waker, closeHandler: config.OnCloseRequest, pressAt: config.PressAt,
-		frameHandler: config.OnFrameChange, minimizeHandler: config.OnMinimize, visibilityHandler: config.OnVisibility, fullscreenHandler: config.OnFullscreen, onReopen: config.OnReopen}
+		frameHandler: config.OnFrameChange, minimizeHandler: config.OnMinimize, visibilityHandler: config.OnVisibility, fullscreenHandler: config.OnFullscreen, onReopen: config.OnReopen, onActivate: config.OnActivate}
 	{
 		state.captureRectangleLayers(config.Rectangles)
 		if config.OnPointer != nil {
@@ -504,6 +505,11 @@ func (application *nativeApplication) OpenWindow(config Config) (platform.Window
 	}
 	application.windows++
 	setApplicationIcon(config.Icon)
+	if config.SetFrameInterval != nil {
+		// Metal's nextDrawable blocks once both drawables are in flight, so the
+		// display paces the frames; the runtime needs no interval of its own.
+		config.SetFrameInterval(0)
+	}
 	if state.web != nil {
 		state.web.token = token
 		if state.webReady != nil {

@@ -54,7 +54,7 @@ Viva reaches Cocoa and Metal through cgo; on Linux, X11 with the system XCB and
 Vulkan loaders; on Windows, Win32 with Direct3D 11 and DirectWrite. Viva loads
 the system libraries at runtime and bundles none of them.
 
-The current release is `v0.5.1`; name it explicitly (`@v0.5.1`) to pin it. Guides,
+The current release is `v0.6.0`; name it explicitly (`@v0.6.0`) to pin it. Guides,
 the API reference, and a component catalog with live previews live in
 [`website/`](website/); run it with `npm run dev` there, or read them on
 [vivaui.dev](https://vivaui.dev/en/), which is also available in
@@ -147,7 +147,8 @@ WebView and no bundled rendering runtime.
 - Experimental Linux/X11 shell with dynamically loaded system XCB, Vulkan,
   Pango, and Cairo; retained rounded rectangles and triangles, layered
   GPU-composited system text, pointer and keyboard input, custom titlebar drag,
-  and a blocking event loop with no idle redraw.
+  a blocking event loop with no idle redraw, and a CPU rasterizer that draws the
+  window when no hardware Vulkan device exists.
 - Event-driven rendering with no idle frame loop.
 - Theme tokens and a statically typed, source-owned translation of the pinned
   shadcn component catalog, including forms, overlays, menus, calendars,
@@ -176,7 +177,7 @@ WebView and no bundled rendering runtime.
 The Windows backend cross-builds for amd64 and arm64 and passes its platform
 tests plus Gallery startup, pointer, and keyboard smoke tests under Wine/DXVK.
 Platform tests, the conformance scenarios and the input, drop and device-loss
-paths run on a Windows 11 virtual machine (WARP) and a Debian KDE/X11 machine
+paths run on a physical Windows 11 machine and a Debian KDE/X11 machine
 (lavapipe); `docs/conformance.md` records the scenarios that need real hardware.
 UI Automation is checked against a real Windows 11 machine from an external
 client (see docs/accessibility.md), and AT-SPI against libatspi on KDE/X11. The

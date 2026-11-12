@@ -467,6 +467,34 @@ func TestMissingVulkanIsNamedAndSaysWhatToInstall(t *testing.T) {
 	}
 }
 
+// A loader whose installed drivers fail to initialize fails enumeration with
+// VK_ERROR_INITIALIZATION_FAILED (a driver-less loader gives
+// VK_ERROR_INCOMPATIBLE_DRIVER). That is still a machine that cannot draw, not a
+// rendering failure: the application must be able to tell them apart and the text
+// must say what to install. Any other enumeration result stays a real failure.
+func TestUnusableVulkanDriverIsNamedAndSaysWhatToInstall(t *testing.T) {
+	renderer := func(status int32) *vulkanRenderer {
+		return &vulkanRenderer{api: &vulkanAPI{
+			enumeratePhysicalDevices: func(uintptr, *uint32, *uintptr) int32 { return status },
+		}}
+	}
+	for _, status := range []int32{vkErrorInitializationFailed, vkErrorIncompatibleDriver} {
+		err := renderer(status).selectDevice()
+		if !errors.Is(err, platform.ErrNoGraphics) {
+			t.Errorf("result %d: %v does not wrap platform.ErrNoGraphics", status, err)
+		}
+		if !strings.Contains(err.Error(), "mesa-vulkan-drivers") {
+			t.Errorf("result %d: %q does not say what to install", status, err)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprint(status)) {
+			t.Errorf("result %d: %q does not report the Vulkan result", status, err)
+		}
+	}
+	if err := renderer(-1).selectDevice(); errors.Is(err, platform.ErrNoGraphics) {
+		t.Errorf("a real failure is reported as no graphics: %v", err)
+	}
+}
+
 func newSuboptimalTestRenderer(acquireStatus, presentStatus int32, recreations *int) *vulkanRenderer {
 	return &vulkanRenderer{
 		device:    10,
@@ -1023,7 +1051,7 @@ func TestVulkanTextUpdatePreservesTexturesAcrossIndexShift(t *testing.T) {
 	}
 }
 
-func TestSelectPresentModePrefersMailboxWithFIFOFallback(t *testing.T) {
+func TestSelectPresentModePrefersFIFOWithMailboxFallback(t *testing.T) {
 	renderer := &vulkanRenderer{
 		physical: 1,
 		surface:  2,
@@ -1039,8 +1067,8 @@ func TestSelectPresentModePrefersMailboxWithFIFOFallback(t *testing.T) {
 			},
 		},
 	}
-	if got := renderer.selectPresentMode(); got != vkPresentMailbox {
-		t.Fatalf("selectPresentMode() = %d, want vkPresentMailbox (%d)", got, vkPresentMailbox)
+	if got := renderer.selectPresentMode(); got != vkPresentFIFO {
+		t.Fatalf("selectPresentMode() = %d, want vkPresentFIFO (%d)", got, vkPresentFIFO)
 	}
 
 	fifoOnly := &vulkanRenderer{

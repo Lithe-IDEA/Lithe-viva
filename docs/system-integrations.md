@@ -31,6 +31,31 @@ synchronous forms report `ErrAsyncRequired`, `ErrSecretStoreUnavailable` or
 | Reduced motion (`ReduceMotion`, returns `bool`) | `NSWorkspace.accessibilityDisplayShouldReduceMotion` | `SPI_GETCLIENTAREAANIMATION` | the settings portal's `reduced-motion` or `enable-animations`, else XSETTINGS `Gtk/EnableAnimations`, else KDE's `AnimationDurationFactor` of 0; a change is applied to a running canvas | `prefers-reduced-motion`, read at mount and watched with `matchMedia` |
 | Fullscreen (`RequestFullscreen`, `OnFullscreen`) | `NSWindow.toggleFullScreen:` | `SetWindowPos` / window style | window-manager fullscreen | `requestFullscreen` / `exitFullscreen`, reported by `fullscreenchange` |
 | Page visibility (`OnMinimize`) | window minimized/restored | window minimized/restored | window minimized/restored | `visibilitychange`; a hidden tab counts as minimized |
+| Window activation (`OnActivate`) | `NSWindowDidBecomeKeyNotification` | `WM_ACTIVATE`, when not `WA_INACTIVE` | an X11 `FocusIn` whose detail is `Ancestor` or `Nonlinear` outside a grab, or GTK's `focus-in-event` | the window `focus` event |
+
+## Opening registered documents
+
+Declare the documents an application opens in `viva.toml`:
+
+```toml
+[[app.file_types]]
+name = "Markdown document"
+extensions = ["md", "markdown"]
+mime = "text/markdown"
+uti = "net.daringfireball.markdown"
+```
+
+The package registers the extensions with the operating system. Windows adds
+the application to **Open with** and **Default apps**, Linux adds it to the
+desktop MIME associations, and macOS adds the extensions and optional UTI to
+the bundle document types. The operating system still asks the user to choose a
+default; applications cannot silently replace Windows' per-user `UserChoice`.
+
+Call `Application.OnOpenFile` during startup to receive each document. macOS
+delivers open documents to the running application through AppKit. Windows and
+Linux start the program with paths as arguments, so an application that keeps a
+single running copy should pass those arguments through
+`app/singleinstance`; the handler itself is not invoked on those systems.
 
 ## Error Semantics
 

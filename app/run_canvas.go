@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/internal/platform"
@@ -98,7 +99,18 @@ func nativeWindowConfig(normalized *Config, painter *painter) (platform.Config, 
 		}
 		frames = newFrameTimer(waker.Wake)
 		painter.scheduleFrame = frames.request
+		painter.noteFrameStart = frames.redrawing
+		painter.coalesceInput = true
 		painter.scheduleIfAnimating()
+	}
+	var setFrameInterval func(time.Duration)
+	if frames != nil {
+		setFrameInterval = func(interval time.Duration) {
+			frames.setInterval(interval)
+			if waker != nil {
+				waker.SetSpacing(max(interval, minFrameInterval))
+			}
+		}
 	}
 	normalized.Web.repaintWith(painter)
 	var resizeHandler platform.ResizeHandler
@@ -165,9 +177,11 @@ func nativeWindowConfig(normalized *Config, painter *painter) (platform.Config, 
 		OnShortcut:       painter.shortcutHandler(normalized),
 		OnAccessibility:  painter.accessibilityHandler(normalized),
 		OnFocusLost:      painter.focusLostHandler(),
+		OnActivate:       normalized.OnActivate,
 		OnScroll:         scrollHandler,
 		OnFileDrop:       dropHandler,
 		OnRedraw:         redrawHandler,
+		SetFrameInterval: setFrameInterval,
 		Waker:            waker,
 		OnCloseRequest:   closeHandler,
 		OnClosed:         normalized.OnClosed,
