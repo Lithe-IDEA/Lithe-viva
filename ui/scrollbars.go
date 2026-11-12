@@ -16,6 +16,7 @@ func (f *frame) paintScrollbars(n *node, s *ScrollState) {
 	parts := f.canvas.Tree().Sub(s.id.Scope(), s.id.Name())
 	vertical, horizontal := parts.At(0), parts.At(1)
 	area := components.BeginScrollArea(f.canvas, f.theme, n.rect, content).
+		Bars(s.barStyle).
 		Offset(s.OffsetX, s.Offset).
 		HoverScrollbars(true). // thin, over the content, shown while it overflows
 		VerticalScrollbar(vertical, "Vertical scrollbar", "").

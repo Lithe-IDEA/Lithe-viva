@@ -1,6 +1,9 @@
 package ui
 
-import "github.com/vivaui/viva/gfx"
+import (
+	"github.com/vivaui/viva/components"
+	"github.com/vivaui/viva/gfx"
+)
 
 // ScrollState is the scroll position of one ScrollArea. It lives in the view, keyed
 // by the area's identity, so the application keeps nothing: declare the area with an
@@ -40,7 +43,10 @@ type ScrollState struct {
 	toEnd    bool    // ScrollToEnd was called and no layout has honored it yet
 	sideways bool    // Box.Sideways: the area scrolls left and right too
 	bars     bool    // Box.Scrollbars: the area draws its own scrollbars
-	dragging bool    // a press on one of the area's scrollbars has the pointer
+	// barStyle is Box.Bars: the geometry of the bars the area draws, or Viva's own when
+	// it is the zero style.
+	barStyle components.ScrollBarStyle
+	dragging bool // a press on one of the area's scrollbars has the pointer
 }
 
 // scrollStore keeps the ScrollStates of a view, by the identity of their areas. A slot
@@ -305,6 +311,17 @@ func (b Box) areaState() *ScrollState {
 		return b.f.exts[n.ext].scrollState
 	}
 	return nil
+}
+
+// Bars overrides the geometry of the scrollbars the area draws: the track width, the
+// hover overlay width, the inset from the track's edge and the least thumb. The zero
+// style keeps Viva's own. It applies to the bars Box.Scrollbars turns on, so call it
+// alongside, and has no effect on a box that is not a ScrollArea.
+func (b Box) Bars(style components.ScrollBarStyle) Box {
+	if s := b.areaState(); s != nil {
+		s.barStyle = style
+	}
+	return b
 }
 
 // ScrollState returns the scroll position of a scroll area: the one ui.Scroll
