@@ -74,10 +74,20 @@ type painter struct {
 	// draws it again.
 	lastFontGeneration uint32
 	lastImages         []gfx.Image
-	views              []platform.NativeView // the native views of this publish
-	lastViews          []platform.NativeView // the ones last sent
-	covers             []gfx.Rect            // backing of the views' Covers
-	stateBySlot        []instanceState
+	// labelImage names, for each label of this frame, the image it was drawn
+	// from (an index into clippedImages, -1 for a text label); lastLabelImage is
+	// the same for the labels last sent. A bitmap needs its pixels again unless
+	// the label in its place showed the same picture: the platform hands a
+	// label its predecessor's texture when both are at the same index and carry
+	// the same content.
+	labelImage       []int32
+	lastLabelImage   []int32
+	lastTextBefores  []uint32              // clippedTextBefores last sent
+	lastImageBefores []uint32              // clippedImageBefores last sent
+	views            []platform.NativeView // the native views of this publish
+	lastViews        []platform.NativeView // the ones last sent
+	covers           []gfx.Rect            // backing of the views' Covers
+	stateBySlot      []instanceState
 	// layerShift is 1 while the frame has a backdrop, which takes platform layer
 	// zero; every canvas layer then travels one higher. It is 0 otherwise.
 	layerShift uint16
@@ -86,7 +96,11 @@ type painter struct {
 	// built from. Comparing it byte for byte (the strings keep the previous
 	// allocations alive, so equal pointers mean equal bytes) lets a repaint that
 	// declared the same hits reuse both instead of mirroring the list again.
-	publishedHits      []gfx.Hit
+	publishedHits []gfx.Hit
+	// cellReplace remembers the font-ready form of lines that hold cell glyphs;
+	// a frame that changed one row of a grid-shaped page sends every row again,
+	// and the rows that did not change rebuild no string and runs.
+	cellReplace        []cellReplaceMemo
 	publishedFocus     gfx.ID
 	publishedTrap      gfx.ID
 	publishedInitial   gfx.ID
@@ -111,6 +125,11 @@ type painter struct {
 	strokes            []gfx.Triangle  // scratch for appendCellGlyphs
 	clippedTexts       []gfx.Text
 	clippedImages      []gfx.Image
+	// clippedTextBefores and clippedImageBefores are how many shapes the frame
+	// paints before each of those labels: the place a renderer puts the label
+	// back among the shapes.
+	clippedTextBefores  []uint32
+	clippedImageBefores []uint32
 	// controls draws the window buttons of a custom titlebar, on platforms where
 	// Viva does; it is nil otherwise.
 	controls *windowControls
@@ -999,6 +1018,9 @@ func (painter *painter) trim() {
 		if _, err := painter.resyncRenderer(); err == nil {
 			painter.stateBySlot = nil
 		}
+		// A page the scene rebuilt wholesale shows other lines; its memoized
+		// replacements are stale retention.
+		painter.cellReplace = painter.cellReplace[:0]
 	}
 	if slots := painter.semantics.Slots(); slots > trimAt && painter.semantics.Len()*trimRatio < slots {
 		painter.semantics = semantic.NewWithCapacity("Viva", len(painter.hitScratch)+1)
@@ -1013,6 +1035,8 @@ func (painter *painter) trim() {
 	painter.lastTexts = trimPainterCapacity(painter.lastTexts)
 	painter.lastRuns = trimPainterCapacity(painter.lastRuns)
 	painter.lastImages = trimPainterCapacity(painter.lastImages)
+	painter.labelImage = trimPainterCapacity(painter.labelImage)
+	painter.lastLabelImage = trimPainterCapacity(painter.lastLabelImage)
 	painter.hitScratch = trimPainterCapacity(painter.hitScratch)
 	painter.publishedHits = trimPainterCapacity(painter.publishedHits)
 	painter.publishedReturns = trimPainterCapacity(painter.publishedReturns)
@@ -1024,6 +1048,10 @@ func (painter *painter) trim() {
 	painter.strokes = trimPainterCapacity(painter.strokes)
 	painter.clippedTexts = trimPainterCapacity(painter.clippedTexts)
 	painter.clippedImages = trimPainterCapacity(painter.clippedImages)
+	painter.clippedTextBefores = trimPainterCapacity(painter.clippedTextBefores)
+	painter.clippedImageBefores = trimPainterCapacity(painter.clippedImageBefores)
+	painter.lastTextBefores = trimPainterCapacity(painter.lastTextBefores)
+	painter.lastImageBefores = trimPainterCapacity(painter.lastImageBefores)
 	painter.accessibility = trimPainterCapacity(painter.accessibility)
 	painter.lastAccess = trimPainterCapacity(painter.lastAccess)
 	painter.changes = trimPainterCapacity(painter.changes)
@@ -1232,7 +1260,8 @@ func (painter *painter) syncTextInput() platform.TextInputUpdate {
 		Target: context.ID,
 		X:      bounds.X, Y: bounds.Y,
 		Width: bounds.Width, Height: bounds.Height,
-		FontSize: fontSize, Weight: weight, Alignment: alignment, Layer: painter.platformLayer(context.Layer), Multiline: context.Multiline, Secure: context.Secure, Terminal: context.Terminal || context.TypeAhead,
+		FontSize: fontSize, Weight: weight, FontGeneration: painter.canvas.FontGeneration(),
+		Alignment: alignment, Layer: painter.platformLayer(context.Layer), Multiline: context.Multiline, Secure: context.Secure, Terminal: context.Terminal || context.TypeAhead,
 		AltSendsEscape: input.AltSendsEscape, KeyReleases: context.Terminal && input.KeyReleases, DisableIME: input.DisableIME, MonoFace: input.MonoFace, CellWidth: cellWidth, Baseline: baseline,
 		NavigationKeys:     input.NavigationKeys || context.NavigationKeys,
 		CopyOverride:       input.CopyOverride,
@@ -1327,7 +1356,8 @@ func (painter *painter) applyTextEvent(event platform.TextEvent) (platform.TextS
 
 func samePlatformTextInput(left, right platform.TextInput) bool {
 	return left.Target == right.Target && left.X == right.X && left.Y == right.Y && left.Width == right.Width && left.Height == right.Height &&
-		left.FontSize == right.FontSize && left.Weight == right.Weight && left.Alignment == right.Alignment && left.Layer == right.Layer && left.Multiline == right.Multiline && left.Secure == right.Secure && left.Terminal == right.Terminal && left.MonoFace == right.MonoFace && left.CellWidth == right.CellWidth && left.Baseline == right.Baseline &&
+		left.FontSize == right.FontSize && left.Weight == right.Weight && left.FontGeneration == right.FontGeneration &&
+		left.Alignment == right.Alignment && left.Layer == right.Layer && left.Multiline == right.Multiline && left.Secure == right.Secure && left.Terminal == right.Terminal && left.MonoFace == right.MonoFace && left.CellWidth == right.CellWidth && left.Baseline == right.Baseline &&
 		left.AltSendsEscape == right.AltSendsEscape && left.KeyReleases == right.KeyReleases && left.DisableIME == right.DisableIME &&
 		left.NavigationKeys == right.NavigationKeys &&
 		left.CopyOverride == right.CopyOverride &&
@@ -1346,113 +1376,150 @@ type shapeRef struct {
 	shadow   bool
 }
 
-// applyClipping drops every shape and text its canvas clip hides and notes, on
-// the others, whether the clip cuts them: a shape left with HasClip set is drawn
-// through a scissor rectangle by the renderer, which is how a partial shape is
-// cut, so no geometry is cut here. It also merges the rectangles, triangles and
-// shadows back into the order they were painted in.
+// applyClipping drops every shape, image and text its canvas clip hides and
+// notes, on the others, whether the clip cuts them: a shape left with HasClip
+// set is drawn through a scissor rectangle by the renderer, which is how a
+// partial shape is cut, so no geometry is cut here. It also merges rectangles,
+// triangles, shadows, texts and images back into the order they were painted
+// in: each primitive carries the paint order the canvas gave it.
 func (painter *painter) applyClipping() {
 	painter.clipped = painter.clipped[:0]
 	painter.clippedPaths = painter.clippedPaths[:0]
 	painter.clippedSoft = painter.clippedSoft[:0]
 	painter.clippedTexts = painter.clippedTexts[:0]
 	painter.clippedImages = painter.clippedImages[:0]
+	painter.clippedTextBefores = painter.clippedTextBefores[:0]
+	painter.clippedImageBefores = painter.clippedImageBefores[:0]
 	painter.order = painter.order[:0]
+	painter.layerShift = 0
+	rectangles := painter.canvas.Rectangles()
 	triangles := painter.canvas.Triangles()
 	shadows := painter.canvas.Shadows()
-	next := 0       // the next canvas triangle to place
-	nextShadow := 0 // the next canvas shadow to place
-	// placeTrianglesBefore places the triangles and shadows painted before
-	// rectangle number rectangles, so they enter the order ahead of it. A shadow
-	// follows the triangles painted before it and precedes the others.
-	placeTrianglesBefore := func(rectangles int) {
-		for {
-			triangleDue := next < len(triangles) && int(triangles[next].RectsBefore) <= rectangles
-			shadowDue := nextShadow < len(shadows) && int(shadows[nextShadow].RectsBefore) <= rectangles
-			if shadowDue && (!triangleDue || int(shadows[nextShadow].TrianglesBefore) <= next) {
-				shadow := shadows[nextShadow]
-				nextShadow++
-				if shadow.HasClip {
-					visible, cut := clipVisibility(shadowBounds(shadow), shadow.ClipOf)
-					if !visible {
-						continue
-					}
-					shadow.HasClip = cut
-				}
-				painter.order = append(painter.order, shapeRef{index: int32(len(painter.clippedSoft)), shadow: true})
-				painter.clippedSoft = append(painter.clippedSoft, shadow)
-				continue
-			}
-			if !triangleDue {
-				return
-			}
-			triangle := triangles[next]
-			next++
-			painter.appendTriangle(triangle)
+	texts := painter.canvas.Texts()
+	images := painter.canvas.Images()
+	// Walk the five lists as one paint order. A primitive with a smaller Order
+	// is painted first; on a tie (a border ring shares its backing rectangle's
+	// order, cell glyphs share their line's) shapes come before images and
+	// images before text.
+	ri, ti, si, xi, ii := 0, 0, 0, 0, 0
+	for ri < len(rectangles) || ti < len(triangles) || si < len(shadows) || xi < len(texts) || ii < len(images) {
+		kind, best := 0, ^uint32(0)
+		if ri < len(rectangles) && rectangles[ri].Order < best {
+			kind, best = 1, rectangles[ri].Order
+		}
+		if ti < len(triangles) && triangles[ti].Order < best {
+			kind, best = 2, triangles[ti].Order
+		}
+		if si < len(shadows) && shadows[si].Order < best {
+			kind, best = 3, shadows[si].Order
+		}
+		if ii < len(images) && images[ii].Order < best {
+			kind, best = 4, images[ii].Order
+		}
+		if xi < len(texts) && texts[xi].Order < best {
+			kind = 5
+		}
+		switch kind {
+		case 1:
+			painter.appendRectangle(rectangles[ri])
+			ri++
+		case 2:
+			painter.appendTriangle(triangles[ti])
+			ti++
+		case 3:
+			painter.appendShadow(shadows[si])
+			si++
+		case 4:
+			painter.appendImage(images[ii])
+			ii++
+		case 5:
+			painter.appendText(texts[xi])
+			xi++
 		}
 	}
-	for number, rectangle := range painter.canvas.Rectangles() {
-		placeTrianglesBefore(number)
-		painter.appendRectangle(rectangle)
+}
+
+// appendImage adds image to the frame's label list unless its clip hides it or
+// it has no area, cutting its source to the visible part. A backdrop is kept
+// apart: its layer moves the rest of the frame above it.
+func (painter *painter) appendImage(image gfx.Image) {
+	if roundPixel(image.Bounds.Width) <= 0 || roundPixel(image.Bounds.Height) <= 0 {
+		return
 	}
-	placeTrianglesBefore(len(painter.canvas.Rectangles()))
-	for _, text := range painter.canvas.Texts() {
-		// A label with no area or no font size paints nothing, and the native
-		// label backends require positive values. Transient layouts (a closing
-		// drawer, a pane squeezed to nothing) can produce one; drop it here
-		// rather than failing the whole frame.
-		if roundPixel(text.Bounds.Width) <= 0 || roundPixel(text.Bounds.Height) <= 0 || text.Style.Size <= 0 {
-			continue
-		}
-		if text.HasClip {
-			if _, visible := intersectVisible(text.Bounds, text.ClipOf); !visible {
-				continue
-			}
-		}
-		painter.clippedTexts = append(painter.clippedTexts, text)
-		if text.RunCount > 0 {
-			painter.appendCellGlyphs(text)
-		}
-	}
-	painter.layerShift = 0
-	for _, image := range painter.canvas.Images() {
-		if roundPixel(image.Bounds.Width) <= 0 || roundPixel(image.Bounds.Height) <= 0 {
-			continue
-		}
-		if image.Backdrop {
-			painter.layerShift = 1
-			painter.clippedImages = append(painter.clippedImages, image)
-			continue
-		}
-		if !image.HasClip {
-			painter.clippedImages = append(painter.clippedImages, image)
-			continue
-		}
-		visible, ok := intersectVisible(image.Bounds, image.ClipOf)
-		if !ok {
-			continue
-		}
-		if image.DevicePixels {
-			// The clip may end between device pixels; the picture is cut at one.
-			scale := painter.canvas.PixelScale()
-			if visible = deviceBounds(visible, scale); visible.Width <= 0 || visible.Height <= 0 {
-				continue
-			}
-		}
-		if visible != image.Bounds {
-			sx := image.Source.Width / image.Bounds.Width
-			sy := image.Source.Height / image.Bounds.Height
-			image.Source.X += (visible.X - image.Bounds.X) * sx
-			image.Source.Y += (visible.Y - image.Bounds.Y) * sy
-			image.Source.Width = visible.Width * sx
-			image.Source.Height = visible.Height * sy
-			image.Bounds = visible
-			if image.DevicePixels {
-				image.Source = wholePixels(image.Source)
-			}
-		}
+	if image.Backdrop {
+		// A backdrop is beneath every layer, before any shape: it carries no
+		// place among them.
+		painter.layerShift = 1
 		painter.clippedImages = append(painter.clippedImages, image)
+		painter.clippedImageBefores = append(painter.clippedImageBefores, 0)
+		return
 	}
+	if !image.HasClip {
+		painter.clippedImages = append(painter.clippedImages, image)
+		painter.clippedImageBefores = append(painter.clippedImageBefores, uint32(len(painter.order)))
+		return
+	}
+	visible, ok := intersectVisible(image.Bounds, image.ClipOf)
+	if !ok {
+		return
+	}
+	if image.DevicePixels {
+		// The clip may end between device pixels; the picture is cut at one.
+		scale := painter.canvas.PixelScale()
+		if visible = deviceBounds(visible, scale); visible.Width <= 0 || visible.Height <= 0 {
+			return
+		}
+	}
+	if visible != image.Bounds {
+		sx := image.Source.Width / image.Bounds.Width
+		sy := image.Source.Height / image.Bounds.Height
+		image.Source.X += (visible.X - image.Bounds.X) * sx
+		image.Source.Y += (visible.Y - image.Bounds.Y) * sy
+		image.Source.Width = visible.Width * sx
+		image.Source.Height = visible.Height * sy
+		image.Bounds = visible
+		if image.DevicePixels {
+			image.Source = wholePixels(image.Source)
+		}
+	}
+	painter.clippedImages = append(painter.clippedImages, image)
+	painter.clippedImageBefores = append(painter.clippedImageBefores, uint32(len(painter.order)))
+}
+
+// appendText adds text to the frame's label list and paints the cell glyph
+// geometry that belongs to it, unless the text paints nothing.
+func (painter *painter) appendText(text gfx.Text) {
+	// A label with no area or no font size paints nothing, and the native label
+	// backends require positive values. Transient layouts (a closing drawer, a
+	// pane squeezed to nothing) can produce one; drop it here rather than failing
+	// the whole frame.
+	if roundPixel(text.Bounds.Width) <= 0 || roundPixel(text.Bounds.Height) <= 0 || text.Style.Size <= 0 {
+		return
+	}
+	if text.HasClip && !textClipVisible(text) {
+		return
+	}
+	painter.clippedTexts = append(painter.clippedTexts, text)
+	if text.RunCount > 0 {
+		painter.appendCellGlyphs(text)
+	}
+	// The cell glyph geometry is part of the line: it is painted before the
+	// glyphs, so the label comes after the shapes just appended.
+	painter.clippedTextBefores = append(painter.clippedTextBefores, uint32(len(painter.order)))
+}
+
+// appendShadow puts shadow in the frame's order after cutting it to its clip,
+// and drops it when nothing of it is inside.
+func (painter *painter) appendShadow(shadow gfx.Shadow) {
+	if shadow.HasClip {
+		visible, cut := clipVisibility(shadowBounds(shadow), shadow.ClipOf)
+		if !visible {
+			return
+		}
+		shadow.HasClip = cut
+	}
+	painter.order = append(painter.order, shapeRef{index: int32(len(painter.clippedSoft)), shadow: true})
+	painter.clippedSoft = append(painter.clippedSoft, shadow)
 }
 
 // appendCellGlyphs paints the geometry of a fixed-pitch line's cell glyphs — the Block Elements,
@@ -1535,6 +1602,28 @@ func triangleBounds(points [3]gfx.Point) gfx.Rect {
 	right := max32(points[0].X, max32(points[1].X, points[2].X))
 	bottom := max32(points[0].Y, max32(points[1].Y, points[2].Y))
 	return gfx.Rect{X: left, Y: top, Width: right - left, Height: bottom - top}
+}
+
+func quadBounds(points [4]gfx.Point) gfx.Rect {
+	left := min32(min32(points[0].X, points[1].X), min32(points[2].X, points[3].X))
+	top := min32(min32(points[0].Y, points[1].Y), min32(points[2].Y, points[3].Y))
+	right := max32(max32(points[0].X, points[1].X), max32(points[2].X, points[3].X))
+	bottom := max32(max32(points[0].Y, points[1].Y), max32(points[2].Y, points[3].Y))
+	return gfx.Rect{X: left, Y: top, Width: right - left, Height: bottom - top}
+}
+
+func textClipVisible(text gfx.Text) bool {
+	_, visible := intersectVisible(text.Bounds, text.ClipOf)
+	if text.HasQuad {
+		_, warped := intersectVisible(quadBounds(text.Quad), text.ClipOf)
+		visible = visible || warped
+	}
+	return visible
+}
+
+func textClipCuts(text gfx.Text) bool {
+	return !containsRect(text.ClipOf, text.Bounds) ||
+		text.HasQuad && !containsRect(text.ClipOf, quadBounds(text.Quad))
 }
 
 func intersectVisible(bounds, clip gfx.Rect) (gfx.Rect, bool) {
@@ -2093,82 +2182,186 @@ func semanticRole(role gfx.Role) semantic.Role {
 // in the previous frame showed, so a picture made of many bitmaps (see
 // gfx.Surface) stages just the ones that changed.
 func (painter *painter) syncLabels() {
-	texts := painter.clippedTexts
 	painter.labels = painter.labels[:0]
-	for index, image := range painter.clippedImages {
-		bitmap := image.Bitmap
-		left := max(int(image.Source.X), 0)
-		top := max(int(image.Source.Y), 0)
-		right := min(int(math.Ceil(float64(image.Source.X+image.Source.Width))), bitmap.Width)
-		bottom := min(int(math.Ceil(float64(image.Source.Y+image.Source.Height))), bitmap.Height)
-		if left >= right || top >= bottom {
-			continue
-		}
-		offset := top*bitmap.Stride + left*4
-		length := (bottom-top-1)*bitmap.Stride + (right-left)*4
-		if offset < 0 || length <= 0 || offset > len(bitmap.Pix) || length > len(bitmap.Pix)-offset {
-			continue
-		}
-		width := roundPixel(image.Bounds.Width)
-		height := roundPixel(image.Bounds.Height)
-		if width <= 0 || height <= 0 {
-			continue
-		}
-		layer := painter.platformLayer(image.Layer)
-		if image.Backdrop {
-			layer = 0
-		}
-		// Rounded to logical pixels, unless the image is laid out in device pixels.
-		x, y, w, h := float32(roundPosition(image.Bounds.X)), float32(roundPosition(image.Bounds.Y)), float32(width), float32(height)
-		if image.DevicePixels {
-			x, y, w, h = image.Bounds.X, image.Bounds.Y, image.Bounds.Width, image.Bounds.Height
-		}
-		painter.labels = append(painter.labels, platform.TextLabel{
-			X: x, Y: y,
-			Width: w, Height: h,
-			Layer:  layer,
-			Bitmap: bitmap.Pix[offset : offset+length], BitmapWidth: right - left, BitmapHeight: bottom - top,
-			BitmapStride: bitmap.Stride, BitmapID: bitmap.ID, BitmapVersion: bitmap.Version,
-			BitmapUpload: index >= len(painter.lastImages) || !sameImageBitmap(image, painter.lastImages[index]),
-		})
-	}
+	painter.labelImage = painter.labelImage[:0]
+	images := painter.clippedImages
+	texts := painter.clippedTexts
 	fontGeneration := painter.canvas.FontGeneration()
-	for _, label := range texts {
-		width := roundPixel(label.Bounds.Width)
-		height := roundPixel(label.Bounds.Height)
-		if width <= 0 || height <= 0 {
+	// Images and texts are each in paint order; merge them back into one order,
+	// because a label and a bitmap are both platform text labels. A backdrop is
+	// beneath everything whatever its own paint order, so it goes first. Each
+	// label carries how many shapes the frame painted before it, which is where
+	// the renderers put it back among them.
+	for ii := range images {
+		if images[ii].Backdrop {
+			painter.appendImageLabel(ii, painter.clippedImageBefores[ii])
+		}
+	}
+	for ii, ti := 0, 0; ii < len(images) || ti < len(texts); {
+		for ii < len(images) && images[ii].Backdrop {
+			ii++
+		}
+		if ti >= len(texts) || (ii < len(images) && images[ii].Order <= texts[ti].Order) {
+			painter.appendImageLabel(ii, painter.clippedImageBefores[ii])
+			ii++
 			continue
 		}
-		// Integer logical-pixel bounds keep the texture exactly one texel per
-		// physical pixel so linear sampling stays crisp on scaled displays.
-		entry := platform.TextLabel{
-			Value:    label.Value,
-			Identity: label.Identity,
-			X:        float32(roundPosition(label.Bounds.X)), Y: float32(roundPosition(label.Bounds.Y)),
-			Width: float32(width), Height: float32(height),
-			OriginX: roundingRemainder(label.Bounds.X), OriginY: roundingRemainder(label.Bounds.Y),
-			FontSize: label.Style.Size, Weight: label.Style.Weight, Italic: label.Style.Italic,
-			Color: platform.Color{
-				Red: float64(label.Style.Color.Red), Green: float64(label.Style.Color.Green),
-				Blue: float64(label.Style.Color.Blue), Alpha: float64(label.Style.Color.Alpha),
-			},
-			Layer: painter.platformLayer(label.Layer),
-			Mono:  label.Style.Mono, MonoFace: label.Style.MonoFace, CellWidth: label.CellWidth, Baseline: label.Baseline, Runs: painter.canvas.TextRuns(label),
-		}
-		if !label.Style.Mono && label.RunCount == 0 {
-			// Only text in the interface font follows its generation.
-			entry.FontGeneration = fontGeneration
-		}
-		if label.RunCount > 0 {
-			// The font does not draw the cell glyphs; appendCellGlyphs did.
-			entry.Value, entry.Runs = gfx.ReplaceCellGlyphs(entry.Value, entry.Runs)
-		}
-		if label.HasClip && !containsRect(label.ClipOf, label.Bounds) {
+		painter.appendTextLabel(texts[ti], fontGeneration, painter.clippedTextBefores[ti])
+		ti++
+	}
+}
+
+// appendImageLabel adds image number index of painter.clippedImages to the
+// frame's labels, after shapesBefore shapes.
+func (painter *painter) appendImageLabel(index int, shapesBefore uint32) {
+	image := painter.clippedImages[index]
+	bitmap := image.Bitmap
+	left := max(int(image.Source.X), 0)
+	top := max(int(image.Source.Y), 0)
+	right := min(int(math.Ceil(float64(image.Source.X+image.Source.Width))), bitmap.Width)
+	bottom := min(int(math.Ceil(float64(image.Source.Y+image.Source.Height))), bitmap.Height)
+	if left >= right || top >= bottom {
+		return
+	}
+	offset := top*bitmap.Stride + left*4
+	length := (bottom-top-1)*bitmap.Stride + (right-left)*4
+	if offset < 0 || length <= 0 || offset > len(bitmap.Pix) || length > len(bitmap.Pix)-offset {
+		return
+	}
+	width := roundPixel(image.Bounds.Width)
+	height := roundPixel(image.Bounds.Height)
+	if width <= 0 || height <= 0 {
+		return
+	}
+	layer := painter.platformLayer(image.Layer)
+	if image.Backdrop {
+		layer = 0
+	}
+	// Rounded to logical pixels, unless the image is laid out in device pixels.
+	x, y, w, h := float32(roundPosition(image.Bounds.X)), float32(roundPosition(image.Bounds.Y)), float32(width), float32(height)
+	if image.DevicePixels {
+		x, y, w, h = image.Bounds.X, image.Bounds.Y, image.Bounds.Width, image.Bounds.Height
+	}
+	painter.labels = append(painter.labels, platform.TextLabel{
+		X: x, Y: y,
+		Width: w, Height: h,
+		Layer:        layer,
+		ShapesBefore: shapesBefore,
+		Bitmap:       bitmap.Pix[offset : offset+length], BitmapWidth: right - left, BitmapHeight: bottom - top,
+		BitmapStride: bitmap.Stride, BitmapID: bitmap.ID, BitmapVersion: bitmap.Version,
+		BitmapUpload: painter.bitmapUpload(image, index),
+	})
+	painter.labelImage = append(painter.labelImage, int32(index))
+}
+
+// bitmapUpload reports whether image number index must carry its pixels to the
+// platform. It may omit them only when the label it is about to become showed
+// the same picture in the frame last sent: the platform then reuses that
+// label's texture. Another draw of the same bitmap elsewhere is no substitute,
+// because the platform decides which label takes which old texture by position
+// first.
+func (painter *painter) bitmapUpload(image gfx.Image, index int) bool {
+	label := len(painter.labels)
+	if image.Bitmap.ID == 0 || label >= len(painter.lastLabelImage) {
+		return true
+	}
+	previous := int(painter.lastLabelImage[label])
+	if previous < 0 || previous >= len(painter.lastImages) {
+		return true
+	}
+	return !sameImageBitmap(image, painter.lastImages[previous])
+}
+
+// appendTextLabel adds one canvas text to the frame's labels.
+func (painter *painter) appendTextLabel(label gfx.Text, fontGeneration uint32, shapesBefore uint32) {
+	width := roundPixel(label.Bounds.Width)
+	height := roundPixel(label.Bounds.Height)
+	if width <= 0 || height <= 0 {
+		return
+	}
+	// Integer logical-pixel bounds keep the texture exactly one texel per
+	// physical pixel so linear sampling stays crisp on scaled displays.
+	entry := platform.TextLabel{
+		Value:    label.Value,
+		Identity: label.Identity,
+		X:        float32(roundPosition(label.Bounds.X)), Y: float32(roundPosition(label.Bounds.Y)),
+		Width: float32(width), Height: float32(height),
+		OriginX: roundingRemainder(label.Bounds.X), OriginY: roundingRemainder(label.Bounds.Y),
+		FontSize: label.Style.Size, Weight: label.Style.Weight, Italic: label.Style.Italic,
+		Color: platform.Color{
+			Red: float64(label.Style.Color.Red), Green: float64(label.Style.Color.Green),
+			Blue: float64(label.Style.Color.Blue), Alpha: float64(label.Style.Color.Alpha),
+		},
+		Layer:        painter.platformLayer(label.Layer),
+		ShapesBefore: shapesBefore,
+		Mono:         label.Style.Mono, MonoFace: label.Style.MonoFace, CellWidth: label.CellWidth, Baseline: label.Baseline, Runs: painter.canvas.TextRuns(label),
+	}
+	if !label.Style.Mono && label.RunCount == 0 {
+		// Only text in the interface font follows its generation.
+		entry.FontGeneration = fontGeneration
+	}
+	if label.RunCount > 0 {
+		// The font does not draw the cell glyphs; appendCellGlyphs did.
+		entry.Value, entry.Runs = painter.replaceCellGlyphs(entry.Value, entry.Runs)
+	}
+	if label.HasClip {
+		if textClipCuts(label) {
 			// The clip cuts the label partway: the renderers scissor to it.
 			entry.Clip, entry.Clipped = label.ClipOf, true
 		}
-		painter.labels = append(painter.labels, entry)
 	}
+	if label.HasQuad {
+		// A warped line keeps its rasterisation box and moves only where the
+		// picture lands, so the platform draws the same texture as a quad.
+		entry.Quad, entry.HasQuad = label.Quad, true
+		for corner, tint := range label.Tint {
+			entry.Tint[corner] = platform.Color{
+				Red: float64(tint.Red), Green: float64(tint.Green),
+				Blue: float64(tint.Blue), Alpha: float64(tint.Alpha),
+			}
+		}
+	}
+	painter.labels = append(painter.labels, entry)
+	painter.labelImage = append(painter.labelImage, -1)
+}
+
+// cellReplaceLimit bounds the memoized cell glyph replacements: a screen holds
+// its grid's rows and a little slack, and past the limit the memo starts over
+// rather than keeping every line a session ever showed.
+const cellReplaceLimit = 256
+
+// cellReplaceMemo is one line's font-ready form: out is what ReplaceCellGlyphs
+// built for in, kept while the same value and runs keep arriving.
+type cellReplaceMemo struct {
+	inValue, outValue string
+	inRuns, outRuns   []gfx.TextRun
+}
+
+// replaceCellGlyphs is gfx.ReplaceCellGlyphs with a memory. A label sync that
+// one changed row opened sends every row again; the rows that kept their value
+// and runs get the replacement they already have instead of a fresh copy of the
+// line and its runs, which is most of the garbage a keystroke in a bordered
+// grid page otherwise makes.
+func (painter *painter) replaceCellGlyphs(value string, runs []gfx.TextRun) (string, []gfx.TextRun) {
+	for i := range painter.cellReplace {
+		if memo := &painter.cellReplace[i]; memo.inValue == value && slices.Equal(memo.inRuns, runs) {
+			return memo.outValue, memo.outRuns
+		}
+	}
+	outValue, outRuns := gfx.ReplaceCellGlyphs(value, runs)
+	// A line without cell glyphs comes back as it went in; it has nothing to
+	// remember, and its runs are the caller's own slice.
+	if len(outRuns) == 0 || len(runs) == 0 || &outRuns[0] == &runs[0] {
+		return outValue, outRuns
+	}
+	if len(painter.cellReplace) >= cellReplaceLimit {
+		painter.cellReplace = painter.cellReplace[:0]
+	}
+	painter.cellReplace = append(painter.cellReplace, cellReplaceMemo{
+		inValue: value, inRuns: append([]gfx.TextRun(nil), runs...),
+		outValue: outValue, outRuns: outRuns,
+	})
+	return outValue, outRuns
 }
 
 // deviceBounds rounds the edges of bounds to whole device pixels of scale.
@@ -2364,19 +2557,34 @@ func (painter *painter) sameAsLastContent() bool {
 	if painter.canvas.FontGeneration() != painter.lastFontGeneration || !sameImages(painter.clippedImages, painter.lastImages) {
 		return false
 	}
+	// A label's place among the shapes can move while the label itself does
+	// not: a shape before it can drop out of the clip, or paint nothing, and
+	// then the renderers must be told where the label goes.
+	if !slices.Equal(painter.clippedTextBefores, painter.lastTextBefores) ||
+		!slices.Equal(painter.clippedImageBefores, painter.lastImageBefores) {
+		return false
+	}
 	left, right := painter.clippedTexts, painter.lastTexts
 	if len(left) != len(right) {
 		return false
 	}
 	for index := range left {
 		a, b := left[index], right[index]
-		if a.Value != b.Value || a.Style != b.Style || a.Identity != b.Identity || a.Layer != b.Layer {
+		if a.Value != b.Value || a.Style != b.Style || a.Identity != b.Identity || a.Layer != b.Layer || a.Order != b.Order {
 			return false
 		}
 		if a.Bounds != b.Bounds || a.CellWidth != b.CellWidth || a.Baseline != b.Baseline || a.RunCount != b.RunCount {
 			return false
 		}
 		if a.HasClip != b.HasClip || a.HasClip && a.ClipOf != b.ClipOf {
+			return false
+		}
+		// Where a warped line lands changes every frame of an animation while
+		// its picture stays the same: the platform must still see the new quad.
+		if a.HasQuad != b.HasQuad {
+			return false
+		}
+		if a.HasQuad && (a.Quad != b.Quad || a.Tint != b.Tint) {
 			return false
 		}
 		if a.RunCount == 0 {
@@ -2402,7 +2610,7 @@ func sameImages(left, right []gfx.Image) bool {
 	}
 	for index := range left {
 		a, b := left[index], right[index]
-		if a.Bounds != b.Bounds || a.Source != b.Source || a.Layer != b.Layer || a.Backdrop != b.Backdrop || a.Bitmap.Width != b.Bitmap.Width ||
+		if a.Bounds != b.Bounds || a.Source != b.Source || a.Layer != b.Layer || a.Order != b.Order || a.Backdrop != b.Backdrop || a.Bitmap.Width != b.Bitmap.Width ||
 			a.Bitmap.Height != b.Bitmap.Height || a.Bitmap.Stride != b.Bitmap.Stride || a.Bitmap.ID != b.Bitmap.ID ||
 			a.Bitmap.Version != b.Bitmap.Version || len(a.Bitmap.Pix) != len(b.Bitmap.Pix) {
 			return false
@@ -2443,7 +2651,10 @@ func sameAccessibility(left, right []platform.AccessibilityNode) bool {
 func (painter *painter) saveContent() {
 	painter.lastFontGeneration = painter.canvas.FontGeneration()
 	painter.lastImages = append(painter.lastImages[:0], painter.clippedImages...)
+	painter.lastLabelImage = append(painter.lastLabelImage[:0], painter.labelImage...)
 	painter.lastTexts = append(painter.lastTexts[:0], painter.clippedTexts...)
+	painter.lastTextBefores = append(painter.lastTextBefores[:0], painter.clippedTextBefores...)
+	painter.lastImageBefores = append(painter.lastImageBefores[:0], painter.clippedImageBefores...)
 	painter.lastRuns = painter.lastRuns[:0]
 	for index := range painter.lastTexts {
 		text := &painter.lastTexts[index]

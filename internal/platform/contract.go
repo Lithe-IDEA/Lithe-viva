@@ -113,6 +113,15 @@ type Config struct {
 	// next frame as soon as the last one is presented. Adapters that present
 	// without blocking must report their display interval instead.
 	SetFrameInterval func(interval time.Duration)
+	// FramePresented, when set together with SetFrameInterval, is called by the
+	// adapter on the window thread once it has finished with a frame the runtime
+	// handed to OnRedraw: it presented the frame, or found nothing to present.
+	// An adapter that reports an interval of zero must call it for every frame,
+	// because the runtime asks for the next frame only then: a loop that holds a
+	// frame message queued at all times makes Windows defer the window's mouse
+	// input until the animation ends. Adapters paced by a positive interval
+	// ignore it.
+	FramePresented func()
 	// Waker, when set together with OnRedraw, lets the runtime request one
 	// redraw from any goroutine without a parked reader goroutine.
 	Waker          *Waker
@@ -329,16 +338,21 @@ type TextLabel struct {
 	// rounds to whole logical pixels): within half a pixel either way. A backend that
 	// places glyphs at device-pixel positions, as the platform's own text does, draws
 	// the text OriginX, OriginY from the label's top left; the others ignore them.
-	OriginX   float32
-	OriginY   float32
-	FontSize  float32
-	Weight    float32
-	Italic    bool
-	Color     Color
-	Layer     uint16
-	Mono      bool
-	MonoFace  gfx.MonoFace
-	CellWidth float32
+	OriginX  float32
+	OriginY  float32
+	FontSize float32
+	Weight   float32
+	Italic   bool
+	Color    Color
+	Layer    uint16
+	// ShapesBefore is how many shape instances the frame painted before this
+	// label. Shapes and labels are kept apart for batching; a renderer merges
+	// them back into paint order at this index, splitting a shape batch a label
+	// falls inside.
+	ShapesBefore uint32
+	Mono         bool
+	MonoFace     gfx.MonoFace
+	CellWidth    float32
 	// Baseline, when nonzero, is the row of the label, counted from its top in logical
 	// pixels, on which a fixed-pitch line's glyphs stand: gfx.Canvas.MonoBaseline for the
 	// label's face, size and height, which is the font's own baseline in the line's cell,
@@ -372,6 +386,16 @@ type TextLabel struct {
 	// BitmapUpload is true only when Bitmap content must cross a native
 	// boundary. A false bitmap label references the matching retained texture.
 	BitmapUpload bool
+	// Quad, while HasQuad, is the shape the label paints instead of the
+	// axis-aligned X, Y, Width, Height rectangle: four corners (top-left,
+	// top-right, bottom-left, bottom-right) in logical pixels, and the straight
+	// RGBA colour multiplied into the pixels drawn at each. X, Y, Width and
+	// Height stay the rasterisation box, which is where the text is laid out.
+	// See gfx.Canvas.LabelQuad. A backend that cannot draw a general quad paints
+	// the label in its box instead.
+	Quad    [4]gfx.Point
+	Tint    [4]Color
+	HasQuad bool
 }
 
 // PressKind is what a press at a window point does in a custom-titlebar window
@@ -803,6 +827,10 @@ type TextInput struct {
 	Height   float32
 	FontSize float32
 	Weight   float32
+	// FontGeneration is the canvas font generation the text is drawn in
+	// (gfx.Canvas.FontGeneration). The platform holds a picture of the editor, so a
+	// field already on screen has to be drawn again when the fonts change under it.
+	FontGeneration uint32
 	// Alignment places a fitted line inside the field. It is a physical edge:
 	// AlignLeft, AlignCenter or AlignRight, already resolved for the text's
 	// direction. A caller holding an AlignStart or AlignEnd passes it through
@@ -935,6 +963,10 @@ const (
 	// whose field accepts more than text (a chat box that takes a screenshot) reads
 	// the other formats itself, with ClipboardImagePNG. Terminals never receive it.
 	TextPasteNoText
+	// TextCancelComposition is an explicit input-method cancellation. It restores
+	// the text and selection the composition replaced and adds no history. An
+	// ordinary empty marked string is not this event.
+	TextCancelComposition
 )
 
 // TextCommand identifies keyboard editing commands emitted by AppKit.
@@ -994,10 +1026,19 @@ type TextHandler func(TextEvent) (TextState, error)
 
 // Apply routes one platform text event into editor: the way a runtime connects
 // a platform text service straight to a Go-owned editor. A replacement range, if
-// the event names one, is selected first, so the event acts on it.
+// the event names one, is selected first, so the event acts on it. A marked-text
+// update that names the active composition itself is the input method continuing
+// that composition: selecting the range first would end it, so the cancel
+// snapshot would hold the preedit instead of the text the composition replaced.
 func (event TextEvent) Apply(editor *text.Editor) {
-	if event.HasReplacement {
-		editor.SetSelection(event.Replacement)
+	if event.HasReplacement && !event.actsOnActiveComposition(editor) {
+		replacement := event.Replacement
+		if selection := editor.Selection(); selection == replacement && selection.Start != selection.End && editor.Caret() == selection.Start {
+			// The selection is backwards: selecting the ordered range would flip
+			// it before the composition records the selection it must restore.
+			replacement = text.Range{Start: replacement.End, End: replacement.Start}
+		}
+		editor.SetSelection(replacement)
 	}
 	switch event.Kind {
 	case TextInsert:
@@ -1008,6 +1049,8 @@ func (event TextEvent) Apply(editor *text.Editor) {
 		editor.SetMarkedText(event.Text, event.MarkedSelection)
 	case TextUnmark:
 		editor.Unmark()
+	case TextCancelComposition:
+		editor.CancelComposition()
 	case TextSetSelection:
 		editor.SetSelection(event.Selection)
 	case TextCommandEvent:
@@ -1068,6 +1111,21 @@ func (event TextEvent) Apply(editor *text.Editor) {
 			editor.DeleteToLineBoundary(true)
 		}
 	}
+}
+
+// actsOnActiveComposition reports whether the event updates or commits the
+// composition that is already active, instead of acting on some other range that
+// must be selected first. Selecting the composition's own range would end it
+// before the event runs, so a cancel would restore the previous preedit and a
+// commit would land in a separate undo unit from the composition it commits.
+func (event TextEvent) actsOnActiveComposition(editor *text.Editor) bool {
+	switch event.Kind {
+	case TextSetMarked, TextInsert:
+	default:
+		return false
+	}
+	composition, composing := editor.Composition()
+	return composing && composition == event.Replacement
 }
 
 // TextHistoryCommand recognizes the conventional primary-modifier undo and

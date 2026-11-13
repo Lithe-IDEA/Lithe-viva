@@ -46,7 +46,8 @@ type ScrollState struct {
 	// barStyle is Box.Bars: the geometry of the bars the area draws, or Viva's own when
 	// it is the zero style.
 	barStyle components.ScrollBarStyle
-	dragging bool // a press on one of the area's scrollbars has the pointer
+	dragging bool    // a press on one of the area's scrollbars has the pointer
+	barSize  float32 // ScrollbarSize: the bars' thickness; zero is the hover default
 }
 
 // scrollStore keeps the ScrollStates of a view, by the identity of their areas. A slot
@@ -109,6 +110,9 @@ func (s *ScrollState) Max() float32 { return max(s.Content-s.Viewport, 0) }
 // MaxX is how far a Sideways area can scroll left; zero for any other area.
 func (s *ScrollState) MaxX() float32 { return max(s.ContentWidth-s.ViewportWidth, 0) }
 
+// Dragging reports whether the pointer is dragging one of the area's bars.
+func (s *ScrollState) Dragging() bool { return s.dragging }
+
 // AtEnd reports whether the area shows its last row, as of the last layout.
 func (s *ScrollState) AtEnd() bool { return s.Offset >= s.Max()-0.5 }
 
@@ -133,6 +137,19 @@ func (s *ScrollState) ScrollTo(offset float32) {
 // ScrollToX scrolls a Sideways area to offset pixels from its left edge, kept in range
 // by the next layout. It has no effect on any other area.
 func (s *ScrollState) ScrollToX(offset float32) { s.OffsetX = max(offset, 0) }
+
+// Follow makes the area keep to its end as content is added, or stop: the
+// imperative form of Box.Follow, for a gesture between paints. A List reads
+// whether it follows when it is declared, before the Box it returns can say
+// Follow(false), so an application that stops following as the user grabs a
+// scrollbar thumb must say so on the state: otherwise the rows that stream in
+// before the next declaration's Follow(false) reach it are pinned to the end.
+func (s *ScrollState) Follow(on bool) {
+	s.follow = on
+	if !on {
+		s.detached = false
+	}
+}
 
 // settle records whether a following area was left before its end.
 func (s *ScrollState) settle() {
@@ -254,7 +271,7 @@ func (f *frame) ScrollArea(id gfx.ID) Box {
 		panic("ui: ScrollArea needs an identity, for example f.ScrollArea(listID) with listID = tree.ID(page, \"list\")")
 	}
 	state := f.scrolls.get(id)
-	state.id, state.follow, state.sideways, state.bars = id, false, false, false
+	state.id, state.follow, state.sideways, state.bars, state.barSize = id, false, false, false, 0
 	state.barStyle = f.barStyle
 	b := f.Scroll(state.Offset)
 	f.extra(b.i).scrollState = state
@@ -267,10 +284,7 @@ func (f *frame) ScrollArea(id gfx.ID) Box {
 func (b Box) Follow(on bool) Box {
 	if n := b.n(); n.ext != 0 {
 		if s := b.f.exts[n.ext].scrollState; s != nil {
-			s.follow = on
-			if !on {
-				s.detached = false
-			}
+			s.Follow(on)
 		}
 	}
 	return b
@@ -297,11 +311,23 @@ func (b Box) Sideways() Box {
 // edges, along whichever way its content overflows, which the pointer drags. A press
 // on a bar beside its thumb brings the middle of the thumb there and drags it on.
 // Without it, scrollbars are the application's, as they were. It has no effect on a
-// box that is not a ScrollArea.
+// box that is not a ScrollArea. The bars are revealed while the pointer is over the
+// area or a bar is dragged; a view drawn without a Page has no pointer, and keeps
+// them revealed.
 func (b Box) Scrollbars() Box {
 	if s := b.areaState(); s != nil {
 		s.bars = true
 		b.f.paintBarsFn = (*frame).paintScrollbars
+	}
+	return b
+}
+
+// ScrollbarSize sets the thickness of the scrollbars Scrollbars draws: a vertical
+// bar's width or a horizontal bar's height. Zero keeps the thin hover default.
+// Like Scrollbars, it has no effect on a box that is not a ScrollArea.
+func (b Box) ScrollbarSize(size float32) Box {
+	if s := b.areaState(); s != nil {
+		s.barSize = size
 	}
 	return b
 }

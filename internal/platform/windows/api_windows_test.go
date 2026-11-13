@@ -29,6 +29,9 @@ func TestNativeStructureABI(t *testing.T) {
 		{"NOTIFYICONDATAW", unsafe.Sizeof(notifyIconData{}), 976},
 		{"NOTIFYICONIDENTIFIER", unsafe.Sizeof(notifyIconIdentifier{}), 40},
 		{"ICONINFO", unsafe.Sizeof(iconInfo{}), 32},
+		{"SHFILEINFOW", unsafe.Sizeof(shFileInfo{}), 696},
+		{"BITMAP", unsafe.Sizeof(gdiBitmap{}), 32},
+		{"MONO BITMAPINFO", unsafe.Sizeof(monoBitmapInfo{}), 48},
 		{"BITMAPV4HEADER", unsafe.Sizeof(bitmapV4Header{}), 108},
 		{"MONITORINFO", unsafe.Sizeof(monitorInfo{}), 40},
 		{"D3D11_BUFFER_DESC", unsafe.Sizeof(bufferDesc{}), 24},
@@ -69,6 +72,22 @@ func TestCopyUTF16Bounds(t *testing.T) {
 	copyUTF16(destination[:], "abcdef")
 	if destination[3] != 0 || syscall.UTF16ToString(destination[:]) != "abc" {
 		t.Fatalf("truncated UTF-16 = %#v", destination)
+	}
+}
+
+func TestNotificationIconCarriesABalloonWithoutShowingATrayEntry(t *testing.T) {
+	data := notificationIconData(42, 7, "Motty", "Motty is still running")
+	if data.Flags&notifyInfo == 0 || data.Flags&notifyState == 0 {
+		t.Fatalf("notification flags = %#x", data.Flags)
+	}
+	if data.State != notifyHidden || data.StateMask != notifyHidden {
+		t.Fatalf("notification state = %#x mask=%#x", data.State, data.StateMask)
+	}
+	if syscall.UTF16ToString(data.Tip[:]) != "Motty" ||
+		syscall.UTF16ToString(data.InfoTitle[:]) != "Motty" ||
+		syscall.UTF16ToString(data.Info[:]) != "Motty is still running" {
+		t.Fatalf("notification text = tip %q title %q body %q",
+			syscall.UTF16ToString(data.Tip[:]), syscall.UTF16ToString(data.InfoTitle[:]), syscall.UTF16ToString(data.Info[:]))
 	}
 }
 

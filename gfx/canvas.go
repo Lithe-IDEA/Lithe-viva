@@ -47,6 +47,11 @@ type Rectangle struct {
 	Layer   uint16
 	ClipOf  Rect
 	HasClip bool
+	// Order is where the rectangle was painted among every primitive of the
+	// frame. Rectangles, triangles, shadows, images and text live in separate
+	// lists; renderers compare Order to paint them in the order the application
+	// called them. It never decreases along Rectangles.
+	Order uint32
 }
 
 // ShadowStyle is one soft drop-shadow layer, the arguments of a CSS box-shadow: the
@@ -81,13 +86,9 @@ type Shadow struct {
 	Layer   uint16
 	ClipOf  Rect
 	HasClip bool
-	// RectsBefore and TrianglesBefore are how many of the canvas's rectangles and
-	// triangles were painted before this shadow. Shadows, rectangles and triangles
-	// live in separate lists; these two counts interleave them back into paint
-	// order, as Triangle.RectsBefore does for triangles. Neither decreases along
-	// Shadows().
-	RectsBefore     uint32
-	TrianglesBefore uint32
+	// Order is where the shadow was painted among every primitive of the frame;
+	// see Rectangle.Order. It never decreases along Shadows.
+	Order uint32
 }
 
 // ShadowLevel is a step of the elevation scale shadcn takes from Tailwind CSS: the
@@ -143,12 +144,11 @@ type Triangle struct {
 	EdgeMask uint8
 	ClipOf   Rect
 	HasClip  bool
-	// RectsBefore is how many of the canvas's rectangles were painted before
-	// this triangle. Rectangles and triangles live in separate lists; this is
-	// what interleaves them back into paint order, so an icon drawn after a
-	// highlight stays above it and one drawn before stays below. It never
-	// decreases along Triangles().
-	RectsBefore uint32
+	// Order is where the triangle was painted among every primitive of the
+	// frame; see Rectangle.Order. It is what keeps an icon drawn after a
+	// highlight above it and one drawn before below it. It never decreases along
+	// Triangles.
+	Order uint32
 }
 
 // TextStyle describes one system-font line.
@@ -272,9 +272,20 @@ type Text struct {
 	// Identity, when nonzero, names this label across frames so a backend can
 	// retain its texture when the paint list reorders. See TextIdentity.
 	Identity TextIdentity
-	Layer    uint16
-	ClipOf   Rect
-	HasClip  bool
+	// Quad, while HasQuad, is where the label's picture lands instead of Bounds:
+	// four corners in the order top-left, top-right, bottom-left, bottom-right,
+	// in logical pixels, and the straight RGBA colour multiplied into the pixels
+	// at each. Bounds stays the box the picture is rasterised in, so the text
+	// keeps its layout and only its placement is warped.
+	Quad    [4]Point
+	Tint    [4]Color
+	HasQuad bool
+	Layer   uint16
+	ClipOf  Rect
+	HasClip bool
+	// Order is where the label was painted among every primitive of the frame;
+	// see Rectangle.Order. It never decreases along Texts.
+	Order uint32
 }
 
 // Bitmap is immutable premultiplied BGRA pixel data. Pixels are stored top
@@ -307,6 +318,10 @@ type Image struct {
 	// painter keeps it so, at a fractional display scale too, instead of rounding
 	// it to logical pixels. See Surface.DrawPixels.
 	DevicePixels bool
+	// Order is where the image was painted among every primitive of the frame;
+	// see Rectangle.Order. A backdrop is drawn beneath everything whatever its
+	// Order. It never decreases along Images.
+	Order uint32
 }
 
 // Role describes the platform-neutral semantic purpose of an interactive hit.
@@ -645,11 +660,14 @@ type Canvas struct {
 	hits        []Hit
 	// hitTexts holds the text geometry of the hits that declared any, in
 	// declaration order; Hit.Text is one more than the entry's index.
-	hitTexts      []HitText
-	clips         []Clip
-	overlayClips  []int // clip-stack baselines for floating content
-	focusScopes   []ID
-	layers        []uint16
+	hitTexts     []HitText
+	clips        []Clip
+	overlayClips []int // clip-stack baselines for floating content
+	focusScopes  []ID
+	layers       []uint16
+	// order is the last paint order handed out this frame; every primitive gets
+	// the next one (see Rectangle.Order).
+	order         uint32
 	pathPoints    []Point
 	contourEnds   []int32
 	contourClosed []bool
@@ -693,6 +711,9 @@ type Canvas struct {
 	spans     []TextSpan
 	cellSizes cellSizeMemos
 	cell      cellGlyph // scratch of CellGlyphGeometry
+	// cellCache holds the cell glyphs the last paints built, keyed by character
+	// and metrics; it survives Reset and is bounded by cellCacheLimit.
+	cellCache []cellGlyphCacheEntry
 	// fits remembers the lines FitLine cut; a different measurement empties it.
 	fits    []fitEntry
 	hovered ID
@@ -942,6 +963,7 @@ func (canvas *Canvas) Reset() {
 	canvas.overlayClips = canvas.overlayClips[:0]
 	canvas.focusScopes = canvas.focusScopes[:0]
 	canvas.layers = canvas.layers[:0]
+	canvas.order = 0
 	canvas.pathPoints = canvas.pathPoints[:0]
 	canvas.contourEnds = canvas.contourEnds[:0]
 	canvas.contourClosed = canvas.contourClosed[:0]
@@ -1063,6 +1085,7 @@ func (canvas *Canvas) DrawBitmapRegion(bitmap Bitmap, source, bounds Rect) {
 		Source: Rect{X: left, Y: top, Width: right - left, Height: bottom - top},
 		Bounds: bounds,
 		Layer:  canvas.currentLayer(),
+		Order:  canvas.nextOrder(),
 	}
 	image.ClipOf, image.HasClip = canvas.clipSnapshot()
 	canvas.images = append(canvas.images, image)
@@ -1095,7 +1118,7 @@ func (canvas *Canvas) Rounded(bounds Rect, radius float32, color Color) {
 }
 
 func (canvas *Canvas) appendRectangle(bounds Rect, color Color, radius float32) {
-	rectangle := Rectangle{Bounds: bounds, Color: color, Radius: radius, Layer: canvas.currentLayer()}
+	rectangle := Rectangle{Bounds: bounds, Color: color, Radius: radius, Layer: canvas.currentLayer(), Order: canvas.nextOrder()}
 	rectangle.ClipOf, rectangle.HasClip = canvas.clipSnapshot()
 	canvas.rectangles = append(canvas.rectangles, rectangle)
 }
@@ -1115,7 +1138,7 @@ func (canvas *Canvas) Shadow(bounds Rect, radius float32, style ShadowStyle, col
 	}
 	shadow := Shadow{
 		Bounds: bounds, Radius: radius, Color: color, Style: style, Layer: canvas.currentLayer(),
-		RectsBefore: uint32(len(canvas.rectangles)), TrianglesBefore: uint32(len(canvas.triangles)),
+		Order: canvas.nextOrder(),
 	}
 	shadow.ClipOf, shadow.HasClip = canvas.clipSnapshot()
 	canvas.shadows = append(canvas.shadows, shadow)
@@ -1274,7 +1297,7 @@ func (canvas *Canvas) LabelCenter(value string, bounds Rect, style TextStyle) {
 // UAX #9 at the font's own advances.
 func (canvas *Canvas) LabelAligned(value string, bounds Rect, style TextStyle, alignment Alignment) {
 	value, bounds.X = canvas.placeLabel(value, bounds, style, alignment)
-	text := Text{Value: value, Bounds: bounds, Style: style, Layer: canvas.currentLayer()}
+	text := Text{Value: value, Bounds: bounds, Style: style, Layer: canvas.currentLayer(), Order: canvas.nextOrder()}
 	if style.Mono && value != "" {
 		text.Baseline = canvas.MonoBaseline(style.Size, style.MonoFace, bounds.Height)
 		if cell, _ := canvas.MonoCellSize(style.Size, style.MonoFace); cell > 0 {
@@ -1479,6 +1502,7 @@ func (canvas *Canvas) LabelRunsWithIdentity(identity TextIdentity, value string,
 		Value: value, Bounds: bounds, Style: style, CellWidth: cellWidth,
 		RunFirst: int32(len(canvas.runs)), RunCount: int32(len(runs)), Identity: identity, Layer: canvas.currentLayer(),
 		Baseline: canvas.MonoBaseline(style.Size, style.MonoFace, bounds.Height),
+		Order:    canvas.nextOrder(),
 	}
 	canvas.runs = append(canvas.runs, runs...)
 	text.ClipOf, text.HasClip = canvas.clipSnapshot()
@@ -1844,6 +1868,14 @@ func (canvas *Canvas) currentLayer() uint16 {
 		return 0
 	}
 	return canvas.layers[len(canvas.layers)-1]
+}
+
+// nextOrder hands out the paint order for the primitive being appended. Every
+// primitive takes one, whatever list it lands in, so the lists can be merged
+// back into the order the application painted them.
+func (canvas *Canvas) nextOrder() uint32 {
+	canvas.order++
+	return canvas.order
 }
 
 // PushOverlayClip opens a floating paint and hit-test region inside viewport.

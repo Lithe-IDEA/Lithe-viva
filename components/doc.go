@@ -119,7 +119,8 @@
 //   - Code editor: `CodeEditor` lays code out on a grid of character cells in a
 //     fixed-pitch font and paints only the rows in view, each as one label
 //     whatever colors the caller's highlighter gives it: line numbers, a
-//     current-line tint, bracket matching, find marks, optional indentation
+//     current-line tint, bracket matching, find marks, display-only
+//     `CodeRepresentation` labels and inverted blobs, optional indentation
 //     guides, soft wrap with optional end markers, sideways scrolling and
 //     draggable scrollbars, with native selection and IME geometry retained.
 //     `CodeEditorCommandForKey` maps key events to the editing commands of a
@@ -197,6 +198,9 @@
 //     ratio inside bounds.
 //   - Resizable: `BeginResizable` paints a two-panel split with a draggable
 //     handle.
+//   - Column resize: `BeginColumnResize` lays out a row of columns and the
+//     draggable dividers between them, mapping a pointer to the new widths or
+//     a double click to the column's content width.
 //   - Reorder list: `BeginReorderList` reserves independent drag handles and
 //     content slots. `ReorderListState` returns completed pointer/keyboard moves
 //     while the application keeps ownership of the ordered data.
@@ -209,8 +213,8 @@
 //     visible hierarchy without owning expansion, loading, or focus.
 //   - Scroll area: `BeginScrollArea` paints a clipped viewport and scrollbar
 //     for caller-owned content; Viewport makes it focusable, ScrollForKey
-//     moves the caller's offsets, and HoverScrollbars narrows the bars to a
-//     hover-revealed overlay.
+//     moves the caller's offsets, ScrollbarSize sets the bars' thickness, and
+//     HoverScrollbars narrows the bars to a hover-revealed overlay.
 //   - Sidebar: `BeginSidebar` paints the app sidebar shell, or
 //     `BeginSidebarWithOptions` with explicit options; it takes header,
 //     group, menu item (with badge and action), sub menu and footer rows, and
@@ -324,10 +328,11 @@
 //     a sequence.
 //   - Typography: `Typography` paints the heading and body text scale.
 //   - Markdown: `MarkdownView` lays out and paints a parsed `markdown.Document`
-//     (headings, lists, quotes, code blocks, tables, bold, links) in a column,
-//     with the link regions and code blocks it contains, and the vertical extent
-//     of each block against its range in the source (`MarkdownAnchor`) for
-//     keeping a source editor and its preview scrolled to the same place.
+//     (headings, lists, quotes, code blocks, tables, bold, links and images,
+//     whose bitmaps the application supplies) in a column, with the link regions
+//     and code blocks it contains, and the vertical extent of each block against
+//     its range in the source (`MarkdownAnchor`) for keeping a source editor and
+//     its preview scrolled to the same place.
 //
 // Foundation:
 //   - Direction: `Direction` selects LTR or RTL inline flow

@@ -50,11 +50,60 @@ type paintedLists struct {
 }
 
 func listsOf(canvas *Canvas) paintedLists {
-	return paintedLists{
+	lists := paintedLists{
 		append([]Rectangle(nil), canvas.Rectangles()...), append([]Triangle(nil), canvas.Triangles()...),
 		append([]Shadow(nil), canvas.Shadows()...), append([]Image(nil), canvas.Images()...),
 		append([]Text(nil), canvas.Texts()...), append([]TextRun(nil), canvas.AllTextRuns()...),
 		append([]Hit(nil), canvas.Hits()...), append([]NativeView(nil), canvas.NativeViews()...),
+	}
+	rerankOrders(&lists)
+	return lists
+}
+
+// rerankOrders replaces each primitive's absolute paint order with its rank in
+// the frame. A replay hands out its own numbers, so two paints that put the
+// same primitives in the same order need not carry the same values.
+func rerankOrders(lists *paintedLists) {
+	ri, ti, si, ii, xi := 0, 0, 0, 0, 0
+	rank := uint32(0)
+	for {
+		kind, best := 0, ^uint32(0)
+		if ri < len(lists.Rectangles) && lists.Rectangles[ri].Order < best {
+			kind, best = 1, lists.Rectangles[ri].Order
+		}
+		if ti < len(lists.Triangles) && lists.Triangles[ti].Order < best {
+			kind, best = 2, lists.Triangles[ti].Order
+		}
+		if si < len(lists.Shadows) && lists.Shadows[si].Order < best {
+			kind, best = 3, lists.Shadows[si].Order
+		}
+		if ii < len(lists.Images) && lists.Images[ii].Order < best {
+			kind, best = 4, lists.Images[ii].Order
+		}
+		if xi < len(lists.Texts) && lists.Texts[xi].Order < best {
+			kind = 5
+		}
+		if kind == 0 {
+			return
+		}
+		rank++
+		switch kind {
+		case 1:
+			lists.Rectangles[ri].Order = rank
+			ri++
+		case 2:
+			lists.Triangles[ti].Order = rank
+			ti++
+		case 3:
+			lists.Shadows[si].Order = rank
+			si++
+		case 4:
+			lists.Images[ii].Order = rank
+			ii++
+		case 5:
+			lists.Texts[xi].Order = rank
+			xi++
+		}
 	}
 }
 
@@ -286,4 +335,25 @@ func TestSameAsPreviousSeesADifference(t *testing.T) {
 			t.Error("a part painted a pixel lower is not the previous one moved by a pixel")
 		}
 	})
+}
+
+// TestMoveSinceMovesAQuadLabel pins that replaying a span at another place
+// carries the label's quad, not only its rasterisation box.
+func TestMoveSinceMovesAQuadLabel(t *testing.T) {
+	var canvas Canvas
+	quad := quadCorners()
+	from := canvas.Mark()
+	canvas.LabelQuad("moved", Rect{X: 4, Y: 5, Width: 60, Height: 18}, quad, TextStyle{Size: 12})
+	canvas.moveSince(from, 40, -7)
+
+	texts := canvas.Texts()
+	if len(texts) != 1 {
+		t.Fatalf("texts = %d, want 1", len(texts))
+	}
+	for corner, point := range quad.Points {
+		want := Point{X: point.X + 40, Y: point.Y - 7}
+		if !pointNear(texts[0].Quad[corner], want) {
+			t.Fatalf("corner %d = %+v, want %+v", corner, texts[0].Quad[corner], want)
+		}
+	}
 }

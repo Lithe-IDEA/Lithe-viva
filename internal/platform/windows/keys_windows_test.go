@@ -48,6 +48,8 @@ func TestATerminalGetsEditingKeysAndChordsAsRawKeys(t *testing.T) {
 		{"Enter", 13, 0, input.KeyEnter, ""},
 		{"Ctrl+R", 'R', input.ModifierControl, input.KeyUnknown, "r"},
 		{"Ctrl+Space", 0x20, input.ModifierControl, input.KeySpace, ""},
+		{"Alt+F", 'F', input.ModifierAlt, input.KeyUnknown, "f"},
+		{"Alt+B", 'B', input.ModifierAlt, input.KeyUnknown, "b"},
 	} {
 		events = events[:0]
 		if !state.textKey(test.vk, 0, test.mods) {
@@ -74,6 +76,47 @@ func TestATerminalGetsEditingKeysAndChordsAsRawKeys(t *testing.T) {
 		}
 		if len(events) != 0 {
 			t.Fatalf("%s sent %+v", test.name, events)
+		}
+	}
+}
+
+// A Control chord names its key by the layout when the key is punctuation.
+// Control+comma, Control+minus, Control+slash and Control+equal type no text of
+// their own, so before the layout named them they never reached the
+// application: a terminal and a remote desktop both got nothing for Control+=
+// and Control+-, which are zoom in and zoom out in most editors.
+func TestControlPunctuationNamesItsKeyFromTheLayout(t *testing.T) {
+	layout, _, _ := getKeyboardLayout.Call(0)
+	if language := layout & 0xffff; language != 0x0409 && language != 0x0804 {
+		t.Skipf("keyboard layout %#x is not US-like", language)
+	}
+	state := &windowState{}
+	var events []platform.KeyEvent
+	state.config.OnKey = func(event platform.KeyEvent) (platform.Frame, error) {
+		events = append(events, event)
+		return platform.Frame{}, nil
+	}
+	for _, test := range []struct {
+		name     string
+		vk, scan uintptr
+		want     string
+	}{
+		{"Control+comma", 0xbc, 0x33, ","},
+		{"Control+minus", 0xbd, 0x0c, "-"},
+		{"Control+equal", 0xbb, 0x0d, "="},
+		{"Control+slash", 0xbf, 0x35, "/"},
+	} {
+		events = events[:0]
+		if !state.keyDown(test.vk, test.scan<<16, input.ModifierControl) {
+			t.Fatalf("%s was not consumed", test.name)
+		}
+		if len(events) != 1 || events[0].Key != input.KeyUnknown || events[0].Text != test.want ||
+			events[0].Modifiers != input.ModifierControl || events[0].Win32.ScanCode != uint16(test.scan) {
+			t.Fatalf("%s = %+v, want the %q key", test.name, events, test.want)
+		}
+		event, ok := state.terminalKeyEvent(test.vk, test.scan<<16, input.ModifierControl)
+		if !ok || event.Key != input.KeyUnknown || event.Text != test.want || event.Modifiers != input.ModifierControl {
+			t.Fatalf("%s without key releases = %+v, %v", test.name, event, ok)
 		}
 	}
 }

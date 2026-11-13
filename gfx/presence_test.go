@@ -266,19 +266,20 @@ func TestPresenceKeepsPaintOrderOfAMixedGroup(t *testing.T) {
 	if len(canvas.Triangles()) == 0 {
 		t.Fatal("icon produced no triangles")
 	}
-	before := canvas.Triangles()[0].RectsBefore
 	frames.now = 20 * time.Millisecond
 	canvas.BeginFrame()
 	paint(false)
 	canvas.EndFrame()
 	// The leaving copy is appended after the rest of the frame, with the icon
 	// still between its two rectangles.
-	if len(canvas.Rectangles()) != 3 {
-		t.Fatalf("rectangles after leaving = %d", len(canvas.Rectangles()))
+	rectangles := canvas.Rectangles()
+	if len(rectangles) != 3 {
+		t.Fatalf("rectangles after leaving = %d", len(rectangles))
 	}
 	last := canvas.Triangles()[len(canvas.Triangles())-1]
-	if last.RectsBefore != before || last.RectsBefore != 2 {
-		t.Fatalf("triangle order after replay: RectsBefore %d (was %d), want the icon between the group's two rectangles", last.RectsBefore, before)
+	if last.Order <= rectangles[1].Order || last.Order >= rectangles[2].Order {
+		t.Fatalf("triangle order %d, want it between the group's two rectangles at %d and %d",
+			last.Order, rectangles[1].Order, rectangles[2].Order)
 	}
 }
 
@@ -370,8 +371,9 @@ func TestPresenceTakesTheOverlaysShadowAlong(t *testing.T) {
 	if len(canvas.Shadows()) != 2 || len(canvas.Rectangles()) != 2 {
 		t.Fatalf("leaving overlay has %d shadows and %d rectangles, want 2 and 2", len(canvas.Shadows()), len(canvas.Rectangles()))
 	}
+	rectangles := canvas.Rectangles()
 	for _, shadow := range canvas.Shadows() {
-		if shadow.RectsBefore != 1 || shadow.TrianglesBefore != 0 {
+		if shadow.Order <= rectangles[0].Order || shadow.Order >= rectangles[1].Order {
 			t.Fatalf("leaving shadow = %+v, want it between the page's rectangle and the overlay's", shadow)
 		}
 	}
@@ -453,5 +455,42 @@ func BenchmarkVectorizeRoundedBorderDuringFade(b *testing.B) {
 	for range b.N {
 		canvas.Reset()
 		paint()
+	}
+}
+
+// TestPresenceMovesAQuadLabel pins that an overlay's label moves its quad with
+// its rasterisation box, without scaling or fading the quad's own tints: the
+// fade is already in the label's colour.
+func TestPresenceMovesAQuadLabel(t *testing.T) {
+	var canvas Canvas
+	frames := newTestFrames(&canvas)
+	canvas.Reset()
+	quad := quadCorners()
+	presence := Presence{
+		Motion:  Motion{Duration: 100 * time.Millisecond, Easing: EaseLinear},
+		Fade:    true,
+		SlideIn: Point{X: 100},
+	}
+	frames.at(0, func() {
+		canvas.BeginPresence(Item(1), 0, presence, Point{})
+		canvas.Fill(Rect{X: 5, Y: 5, Width: 20, Height: 20}, Color{Alpha: 1})
+		canvas.LabelQuad("hello", Rect{X: 5, Y: 5, Width: 90, Height: 20}, quad, TextStyle{Size: 12, Color: Color{Alpha: 1}})
+		canvas.EndPresence()
+	})
+
+	rectangle := canvas.Rectangles()[0]
+	dx, dy := rectangle.Bounds.X-5, rectangle.Bounds.Y-5
+	texts := canvas.Texts()
+	if len(texts) != 1 {
+		t.Fatalf("texts = %d, want 1", len(texts))
+	}
+	for corner, point := range quad.Points {
+		want := Point{X: point.X + dx, Y: point.Y + dy}
+		if !pointNear(texts[0].Quad[corner], want) {
+			t.Fatalf("corner %d = %+v, want %+v (the quad moves with the label)", corner, texts[0].Quad[corner], want)
+		}
+	}
+	if texts[0].Tint != quad.Tint {
+		t.Fatalf("tint = %+v, want the caller's %+v (the fade is in the label colour)", texts[0].Tint, quad.Tint)
 	}
 }

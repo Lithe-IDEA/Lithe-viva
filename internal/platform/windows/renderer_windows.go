@@ -140,10 +140,17 @@ type renderer struct {
 	labelNextIdentities                                          map[gfx.TextIdentity]int
 	labelUsed                                                    []bool
 	labelFree                                                    []int
+	labelPictures                                                labelPictureCache
+	textGeneration                                               uint32
+	noLabelPictures                                              bool
 	compositingBatches                                           []compositingBatch
 	color                                                        platform.Color
 	capacity, width, height                                      int
 	submissions, rebuilds, partials, labelRebuilds               uint64
+	labelBatches                                                 uint64
+	// noLabelBatch makes a frame rasterize each changed label on its own, as
+	// before the batch path existed. Tests compare the two pixel by pixel.
+	noLabelBatch bool
 }
 
 var textureIID = guid{0x6f15aaf2, 0xd208, 0x4e89, [8]byte{0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c}}
@@ -158,6 +165,10 @@ func groupTextLayers(labels []labelTexture, frameOrder, order []int) []int {
 	return order
 }
 
+// groupCompositingLayers merges the shape batches and the text labels of each
+// layer into the order the application painted them. Each label says how many
+// shapes were painted before it, so a label may fall between two instances of
+// one batch, which then draws in two parts.
 func groupCompositingLayers(rectangles []render.Batch, labels []labelTexture, labelOrder []int, batches []compositingBatch) []compositingBatch {
 	batches = batches[:0]
 	for rectangleIndex, labelIndex := 0, 0; rectangleIndex < len(rectangles) || labelIndex < len(labelOrder); {
@@ -168,17 +179,44 @@ func groupCompositingLayers(rectangles []render.Batch, labels []labelTexture, la
 		if labelIndex < len(labelOrder) && labels[labelOrder[labelIndex]].label.Layer < layer {
 			layer = labels[labelOrder[labelIndex]].label.Layer
 		}
-		for rectangleIndex < len(rectangles) && rectangles[rectangleIndex].Layer == layer {
-			rectangle := rectangles[rectangleIndex]
-			batches = append(batches, compositingBatch{Kind: compositeRectangles, Layer: layer, Clipped: rectangle.Clipped, Clip: rectangle.Clip, First: rectangle.First, Count: rectangle.Count})
-			rectangleIndex++
+		batchEnd := rectangleIndex
+		for batchEnd < len(rectangles) && rectangles[batchEnd].Layer == layer {
+			batchEnd++
 		}
-		firstLabel := labelIndex
-		for labelIndex < len(labelOrder) && labels[labelOrder[labelIndex]].label.Layer == layer {
-			labelIndex++
+		labelEnd := labelIndex
+		for labelEnd < len(labelOrder) && labels[labelOrder[labelEnd]].label.Layer == layer {
+			labelEnd++
 		}
-		if labelIndex != firstLabel {
-			batches = append(batches, compositingBatch{Kind: compositeText, Layer: layer, First: firstLabel, Count: labelIndex - firstLabel})
+		cursor := 0
+		if rectangleIndex < batchEnd {
+			cursor = rectangles[rectangleIndex].First
+		}
+		for rectangleIndex < batchEnd || labelIndex < labelEnd {
+			if labelIndex < labelEnd && (rectangleIndex >= batchEnd || int(labels[labelOrder[labelIndex]].label.ShapesBefore) <= cursor) {
+				if count := len(batches); count > 0 && batches[count-1].Kind == compositeText &&
+					batches[count-1].Layer == layer && batches[count-1].First+batches[count-1].Count == labelIndex {
+					batches[count-1].Count++
+				} else {
+					batches = append(batches, compositingBatch{Kind: compositeText, Layer: layer, First: labelIndex, Count: 1})
+				}
+				labelIndex++
+				continue
+			}
+			batch := rectangles[rectangleIndex]
+			end := batch.First + batch.Count
+			first := cursor
+			for cursor < end && (labelIndex >= labelEnd || cursor < int(labels[labelOrder[labelIndex]].label.ShapesBefore)) {
+				cursor++
+			}
+			if cursor > first {
+				batches = append(batches, compositingBatch{Kind: compositeRectangles, Layer: layer, Clipped: batch.Clipped, Clip: batch.Clip, First: first, Count: cursor - first})
+			}
+			if cursor == end {
+				rectangleIndex++
+				if rectangleIndex < batchEnd {
+					cursor = rectangles[rectangleIndex].First
+				}
+			}
 		}
 	}
 	return batches
@@ -540,6 +578,11 @@ func (renderer *renderer) presentWithSync(width, height int, scale float32, sync
 // compositing batch onto it. The window's present and the offscreen render
 // share it, so a screenshot is made of the pixels the window would show.
 func (renderer *renderer) draw(width, height int, scale float32) error {
+	// A page that appeared has many labels to draw; draw their pixels in one
+	// Direct2D session before any of them is composited.
+	if err := renderer.prepareLabels(scale); err != nil {
+		return err
+	}
 	clear := [4]float32{float32(renderer.color.Red), float32(renderer.color.Green), float32(renderer.color.Blue), float32(renderer.color.Alpha)}
 	if renderer.usesComposition() {
 		clear[0] *= clear[3]
@@ -606,7 +649,7 @@ func (renderer *renderer) draw(width, height int, scale float32) error {
 					label.close()
 					continue
 				}
-				if label.view == 0 || label.stale || label.scale != scale || label.skip != skip || skip > 0 && label.width != windowWidth ||
+				if label.view == 0 || label.stale || label.scale != scale || label.skip != skip || skip > 0 && label.width != windowWidth || renderer.pictureChanged(label, scale, skip, windowWidth) ||
 					len(label.label.Bitmap) > 0 && platform.BitmapTextureStale(label.label, scale, label.width, label.height) {
 					if err := renderer.rasterize(label, scale); err != nil {
 						return fmt.Errorf("rasterize label %d: %w", index, err)
@@ -691,9 +734,10 @@ func (renderer *renderer) releaseDevice() {
 		comCall(renderer.context, 111)
 	}
 	for index := range renderer.labels {
-		release(&renderer.labels[index].view)
-		release(&renderer.labels[index].texture)
+		renderer.labels[index].dropTexture()
 	}
+	renderer.labelPictures.evict(0)
+	renderer.labelPictures = labelPictureCache{}
 	renderer.capacity, renderer.width, renderer.height = 0, 0, 0
 	renderer.releaseComposition()
 	for _, object := range [...]*uintptr{&renderer.target, &renderer.swap, &renderer.view, &renderer.buffer, &renderer.constants, &renderer.blend, &renderer.textBlend, &renderer.raster, &renderer.sampler, &renderer.rectangleVertex, &renderer.rectangleFragment, &renderer.textVertex, &renderer.textFragment, &renderer.context, &renderer.device} {

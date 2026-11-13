@@ -171,22 +171,24 @@ func TestGroupTextLayersStable(t *testing.T) {
 
 func TestGroupCompositingLayersInterleavesByLayer(t *testing.T) {
 	rectangles := render.GroupBatches(nil, layered(2, 0, 1, 0))
+	// Labels arrive in paint order, saying how many shapes came before each:
+	// one after the first shape, two after the second, two after the third.
 	labels := []labelTexture{
-		{label: platform.TextLabel{Value: "layer one", Layer: 1}},
-		{label: platform.TextLabel{Value: "first layer zero", Layer: 0}},
-		{label: platform.TextLabel{Value: "layer two", Layer: 2}},
-		{label: platform.TextLabel{Value: "second layer zero", Layer: 0}},
+		{label: platform.TextLabel{Value: "layer one", Layer: 1, ShapesBefore: 1}},
+		{label: platform.TextLabel{Value: "first layer zero", Layer: 0, ShapesBefore: 2}},
+		{label: platform.TextLabel{Value: "layer two", Layer: 2, ShapesBefore: 3}},
+		{label: platform.TextLabel{Value: "second layer zero", Layer: 0, ShapesBefore: 3}},
 	}
 	order := groupTextLayers(labels, []int{0, 1, 2, 3}, nil)
 	got := groupCompositingLayers(rectangles, labels, order, nil)
 	want := []compositingBatch{
 		{Kind: compositeRectangles, Layer: 0, First: 1, Count: 1},
-		{Kind: compositeRectangles, Layer: 0, First: 3, Count: 1},
 		{Kind: compositeText, Layer: 0, First: 0, Count: 2},
-		{Kind: compositeRectangles, Layer: 1, First: 2, Count: 1},
+		{Kind: compositeRectangles, Layer: 0, First: 3, Count: 1},
 		{Kind: compositeText, Layer: 1, First: 2, Count: 1},
-		{Kind: compositeRectangles, Layer: 2, First: 0, Count: 1},
+		{Kind: compositeRectangles, Layer: 1, First: 2, Count: 1},
 		{Kind: compositeText, Layer: 2, First: 3, Count: 1},
+		{Kind: compositeRectangles, Layer: 2, First: 0, Count: 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d batches, want %d: %+v", len(got), len(want), got)
@@ -238,7 +240,7 @@ func TestRendererReusesAMovedLabelByIdentity(t *testing.T) {
 	}
 }
 
-func TestRendererDoesNotShareTexturesAcrossOwners(t *testing.T) {
+func TestRendererDoesNotShareSlotsAcrossOwners(t *testing.T) {
 	first := platform.TextLabel{Value: "same", Width: 30, Height: 10, Identity: gfx.TextIdentity{Owner: 1, Item: 7}}
 	other := platform.TextLabel{Value: "same", Width: 30, Height: 10, Identity: gfx.TextIdentity{Owner: 2, Item: 7}}
 	var renderer renderer
@@ -251,7 +253,7 @@ func TestRendererDoesNotShareTexturesAcrossOwners(t *testing.T) {
 		t.Fatal(err)
 	}
 	if renderer.labelFrame[0] == firstSlot {
-		t.Fatal("the same item number under another owner reused the texture")
+		t.Fatal("the same item number under another owner reused the retained slot")
 	}
 	otherSlot := renderer.labelFrame[0]
 	renderer.labels[otherSlot].stale = false

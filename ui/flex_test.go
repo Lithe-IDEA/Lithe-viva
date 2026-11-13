@@ -367,10 +367,11 @@ func TestPercentBasisAndCappedGrowth(t *testing.T) {
 func TestBaselineAlignmentLinesUpDifferentSizes(t *testing.T) {
 	var view View
 	var big, small Box
+	canvas := testCanvas()
 	baseline := func(b Box, size float32) float32 {
-		return b.Rect().Y + (b.Rect().Height-size-7)/2 + (size+7-size)/2 + size*0.8
+		return canvas.LabelBaseline(b.Rect(), gfx.TextStyle{Size: size})
 	}
-	f := view.Begin(testCanvas(), gfx.LightTheme(), gfx.Rect{Width: 300, Height: 60})
+	f := view.Begin(canvas, gfx.LightTheme(), gfx.Rect{Width: 300, Height: 60})
 	f.Row().Height(60).Items(Baseline).Children(func() {
 		big = f.Text("Big").FontSize(24)
 		small = f.Text("small").FontSize(11)
@@ -742,8 +743,8 @@ func TestShadowIsCastByTheElementsRoundedRectangleUnderItsFill(t *testing.T) {
 	if shadows[0].Bounds != (gfx.Rect{Width: 40, Height: 20}) || shadows[0].Radius != 6 {
 		t.Fatalf("shadow cast by %+v radius %v, want the element's rectangle", shadows[0].Bounds, shadows[0].Radius)
 	}
-	if len(canvas.Rectangles()) != 1 || shadows[1].RectsBefore != 0 {
-		t.Fatalf("the shadow must be painted before the fill: %d rectangles, shadow after %d", len(canvas.Rectangles()), shadows[1].RectsBefore)
+	if rectangles := canvas.Rectangles(); len(rectangles) != 1 || shadows[1].Order >= rectangles[0].Order {
+		t.Fatalf("the shadow must be painted before the fill: %d rectangles, shadow at %d", len(rectangles), shadows[1].Order)
 	}
 }
 

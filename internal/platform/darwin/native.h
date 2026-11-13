@@ -191,6 +191,18 @@ typedef struct {
     // the label in logical pixels (platform.TextLabel.Baseline); 0 for every other label,
     // which stands on the row all proportional text shares.
     float baseline;
+    // When quad holds any value other than all zeros the label paints that
+    // shape instead of x, y, width, height: the four corners in the order
+    // top-left, top-right, bottom-left, bottom-right, in logical pixels, and the
+    // straight RGBA colour multiplied into the pixels at each corner
+    // (platform.TextLabel.Quad). x, y, width and height stay the rasterisation
+    // box, so the picture of the label is what the quad places.
+    float quad[8];
+    float tint[16];
+    // shapes_before is how many shape instances the frame painted before this
+    // label (platform.TextLabel.ShapesBefore): the composite plan interleaves
+    // text and shapes at that index.
+    uint32_t shapes_before;
 } viva_text_label;
 
 // viva_clip is the region, in logical pixels, that one rectangle or triangle
@@ -216,6 +228,9 @@ typedef struct {
     float clip_y;
     float clip_width;
     float clip_height;
+    // sequence is where this command falls in the frame's paint order. Commands
+    // are drawn layer by layer, and in sequence order within a layer.
+    uint32_t sequence;
 } viva_composite_command;
 
 enum {
@@ -355,6 +370,7 @@ void viva_probe_front(void);
 void viva_probe_close(void);
 int viva_offscreen_set_rectangles(void *offscreen, const viva_rectangle *rectangles, const viva_clip *clips, size_t count);
 int viva_offscreen_set_labels(void *offscreen, const viva_text_label *labels, size_t count);
+size_t viva_offscreen_label_texture_bytes(void *offscreen);
 int viva_offscreen_set_text_input(void *offscreen, viva_text_input_config config);
 int viva_offscreen_render(
     void *offscreen,
@@ -396,17 +412,26 @@ int viva_view_update_rectangles(
     int rebuild,
     int render
 );
+/* Makes the window's Metal device, pipelines and textures again after the
+ * renderer lost its resources; the scene must be sent again as a rebuild.
+ * Returns 0 on success. */
+int viva_view_recover(void *view);
 int viva_view_update_labels(
     void *view,
     const viva_text_label *labels,
     size_t count
 );
 
+/* The instance slots the renderer's rectangle buffers need for count
+ * instances, given the slots they already hold: the same capacity while it
+ * covers the count, doubled until it does otherwise. */
+size_t viva_rectangle_capacity(size_t capacity, size_t count);
 int viva_plan_composite(
     const viva_rectangle *rectangles,
     const viva_clip *clips,
     size_t rectangle_count,
     const uint16_t *text_layers,
+    const uint32_t *text_shapes_before,
     size_t text_count,
     viva_composite_command *commands,
     size_t command_capacity,
@@ -440,6 +465,12 @@ int viva_view_update_text(
     int render
 );
 int viva_view_update_text_input(void *view, viva_text_input_config text_input);
+// viva_view_update_text_input_keeping_composition mirrors the same editor
+// again after its frame, caret or style moved, without ending the input
+// method's composition. The application has already acknowledged the text and
+// selection it passes, so a field that grows a row or is scrolled under the
+// pointer keeps the pinyin, kana or hangul being composed.
+int viva_view_update_text_input_keeping_composition(void *view, viva_text_input_config text_input);
 int viva_text_input_caret_should_blink(
     int enabled,
     size_t selected_length,
@@ -487,6 +518,14 @@ int viva_measure_text(
 // viva_text_set_family names the family viva_text_line_create shapes in, or "" (or
 // NULL) for the system font. It copies the name; call it before any line is shaped.
 void viva_text_set_family(const char *family);
+// viva_text_set_thickening draws Viva's text with a thicker stroke (nonzero, CoreText's
+// font smoothing) or with the font's own outlines (zero). It returns whether the weight
+// changed, so a caller can leave everything drawn with the old one alone.
+int viva_text_set_thickening(int thickening);
+// viva_text_system_thickening reports whether the user leaves the system's own font
+// smoothing on (AppleFontSmoothing absent or nonzero; zero, or a value that is not a
+// number, off). The engine starts its weight there, as AppKit's own text does.
+int viva_text_system_thickening(void);
 
 viva_text_line *viva_text_line_create(const unsigned char *utf8, size_t length, double font_size, double font_weight);
 viva_text_line *viva_text_line_create_style(const unsigned char *utf8, size_t length, double font_size, double font_weight, int italic);

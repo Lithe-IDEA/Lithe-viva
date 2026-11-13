@@ -32,11 +32,20 @@ type MarkdownStyle struct {
 	// tell from the line itself. The colors come from MarkdownLook.Code.
 	Highlight func(language, line string, dst []MarkdownCodeRun) []MarkdownCodeRun
 	// Image, when set, is asked for the bitmap of every image (![alt](destination)),
-	// with the destination as written. The view never reads files or the network:
-	// an application resolves relative paths and fetches what it allows. A bitmap's
-	// pixels are its size in the layout, scaled down to the column and never up.
-	// false lays the image out as its alt text, so an application can answer once
-	// the image has loaded and lay the document out again.
+	// with the destination as written, while the view lays out: the bitmap decides
+	// the room the image takes. It is asked on every Layout, and more than once for
+	// one image (a table measures its cells before laying them out), so answer from
+	// a cache. The view never reads files or the network; an application resolves
+	// relative paths and fetches what it allows. A bitmap's pixels are its size in
+	// the layout, scaled down to the column and never up. The renderer's texture
+	// cache knows a bitmap by gfx.Bitmap.ID and Version, as AvatarData's doc says,
+	// so give each bitmap a stable ID and bump Version when its pixels change.
+	// Without an ID every paint sends the pixels to the painter again, so a document
+	// with images re-uploads them on every frame. An ok of false lays the image out
+	// as its alt text, so an application can answer once the image has loaded, lay
+	// the document out again and invalidate. The alt text stays part of the
+	// document's text, for search and copy, while an image itself has no caret or
+	// selection highlight.
 	Image func(destination string) (gfx.Bitmap, bool)
 }
 
@@ -493,7 +502,9 @@ type mdBox struct {
 
 type mdLink struct {
 	x, y, w, h float32
-	size       float32
+	// underline is where the hover underline sits below the link's top: at
+	// the baseline of a text link, at the bottom edge of an image link.
+	underline  float32
 	text, dest string
 }
 
@@ -1480,7 +1491,7 @@ func (m *mdLine) place(a mdAtom) {
 		x := m.x0 + m.x
 		v.images = append(v.images, mdImage{bitmap: a.bitmap, x: x, y: m.y, w: a.w, h: a.h})
 		if sp.Link != "" {
-			v.links = append(v.links, mdLink{x: x, y: m.y, w: a.w, h: a.h, size: m.t.size, text: sp.Text, dest: sp.Link})
+			v.links = append(v.links, mdLink{x: x, y: m.y, w: a.w, h: a.h, underline: a.h - 1, text: sp.Text, dest: sp.Link})
 		}
 		m.x += a.w
 		m.w = m.x
@@ -1582,7 +1593,7 @@ func (m *mdLine) closePiece() {
 	if sp.Link != "" {
 		v.links = append(v.links, mdLink{
 			x: p.x + p.padX, y: p.y, w: p.w - 2*p.padX, h: p.h,
-			size: p.size, text: p.text, dest: sp.Link,
+			underline: p.h/2 + p.size*0.6, text: p.text, dest: sp.Link,
 		})
 		p.link = int32(len(v.links) - 1)
 	}
@@ -1616,7 +1627,8 @@ func (m *mdLine) endLine() {
 			}
 		}
 	}
-	// A line with an image is as tall as the image, with the text along its top.
+	// A line with an image is as tall as the tallest image, with the text along its
+	// top and a little air below the pixels so that stacked images do not touch.
 	m.y += max(m.t.line, m.tall+4)
 	m.l.lines++
 	m.reset()
@@ -1742,7 +1754,7 @@ func (v *MarkdownView) Paint(canvas *gfx.Canvas, p MarkdownPaint) {
 		id := p.Links.At(p.Base + index)
 		canvas.HitWithOptions(id, rect, link.text, gfx.HitOptions{Role: gfx.RoleLink})
 		if canvas.Hovered() == id {
-			canvas.Fill(gfx.Rect{X: rect.X, Y: rect.Y + rect.Height/2 + link.size*0.6, Width: rect.Width, Height: 1}, look.Link)
+			canvas.Fill(gfx.Rect{X: rect.X, Y: rect.Y + link.underline, Width: rect.Width, Height: 1}, look.Link)
 		}
 	}
 }

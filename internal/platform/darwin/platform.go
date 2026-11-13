@@ -74,6 +74,7 @@ const (
 	TextSetSelection                = platform.TextSetSelection
 	TextPaste                       = platform.TextPaste
 	TextPasteNoText                 = platform.TextPasteNoText
+	TextCancelComposition           = platform.TextCancelComposition
 	TextDeleteBackward              = platform.TextDeleteBackward
 	TextDeleteForward               = platform.TextDeleteForward
 	TextMoveLeft                    = platform.TextMoveLeft
@@ -170,19 +171,27 @@ type runState struct {
 	scrollHandler   ScrollHandler
 	dropHandler     FileDropHandler
 	redrawHandler   platform.RedrawHandler
+	// framePresented tells the runtime a frame it handed over is on the screen,
+	// so a present-paced frame clock asks for the next one only then.
+	framePresented  func()
 	closeHandler    CloseRequestHandler
 	textHandler     TextHandler
 	textState       TextState
 	textInput       TextInput
 	textInputActive bool
 	textEventRedraw bool
-	rectangleLayers []uint16
 	// web hosts the pages of the window when the application asked for any.
 	web            *webState
 	webReady       func()
 	rectangleData  []C.viva_rectangle
 	rectangleClips []C.viva_clip
-	err            error
+	// devices decides how many times this window may make its Metal resources
+	// again when the renderer loses them.
+	devices platform.DeviceRecovery
+	// rebuildNextFrame says the window's instance buffers are empty because its
+	// resources were made again, so the next frame sends the whole scene.
+	rebuildNextFrame bool
+	err              error
 }
 
 type nativeApplication struct {
@@ -254,10 +263,24 @@ func (state *runState) textInputAlreadyUpdated(input *TextInput) bool {
 		sameTextInputPresentation(state.textInput, *input)
 }
 
+// textInputKeepsComposition reports whether next is the same focused editor
+// with the text state the application already acknowledged. A field that grows
+// a row, scrolls or moves under the pointer keeps what the input method is
+// composing; another field, another kind of editor, or text and selection
+// rewritten from outside replaces the editor and ends the composition.
+func (state *runState) textInputKeepsComposition(next *TextInput) bool {
+	return state.textInputActive && next != nil &&
+		state.textInput.Target == next.Target &&
+		state.textInput.Multiline == next.Multiline && state.textInput.Secure == next.Secure &&
+		state.textInput.Terminal == next.Terminal && state.textInput.Placed == next.Placed &&
+		state.textState == next.State.WithoutRedraw()
+}
+
 func sameTextInputPresentation(left, right TextInput) bool {
 	return left.Target == right.Target && left.X == right.X && left.Y == right.Y &&
 		left.Width == right.Width && left.Height == right.Height &&
-		left.FontSize == right.FontSize && left.Alignment == right.Alignment && left.Layer == right.Layer && left.Multiline == right.Multiline && left.Secure == right.Secure &&
+		left.FontSize == right.FontSize && left.FontGeneration == right.FontGeneration &&
+		left.Alignment == right.Alignment && left.Layer == right.Layer && left.Multiline == right.Multiline && left.Secure == right.Secure &&
 		left.Terminal == right.Terminal && left.MonoFace == right.MonoFace && left.AltSendsEscape == right.AltSendsEscape && left.KeyReleases == right.KeyReleases && left.Color == right.Color &&
 		left.CopyOverride == right.CopyOverride &&
 		left.State == right.State
@@ -358,70 +381,20 @@ func (application *nativeApplication) OpenWindow(config Config) (platform.Window
 
 	state := &runState{application: application, onClosed: config.OnClosed, waker: config.Waker, closeHandler: config.OnCloseRequest, pressAt: config.PressAt,
 		frameHandler: config.OnFrameChange, minimizeHandler: config.OnMinimize, visibilityHandler: config.OnVisibility, fullscreenHandler: config.OnFullscreen, onReopen: config.OnReopen, onActivate: config.OnActivate}
-	{
-		state.captureRectangleLayers(config.Rectangles)
-		if config.OnPointer != nil {
-			state.pointerHandler = func(event PointerEvent) (Frame, error) {
-				frame, err := config.OnPointer(event)
-				state.captureFrameLayers(frame, err)
-				return frame, err
-			}
-		}
-		if config.OnResize != nil {
-			state.resizeHandler = func(size Size) (Frame, error) {
-				frame, err := config.OnResize(size)
-				state.captureFrameLayers(frame, err)
-				return frame, err
-			}
-		}
-		if config.OnKey != nil {
-			state.keyHandler = func(event KeyEvent) (Frame, error) {
-				frame, err := config.OnKey(event)
-				state.captureFrameLayers(frame, err)
-				return frame, err
-			}
-		}
-		if config.OnFocusLost != nil {
-			state.focusLostHandler = func() (Frame, error) {
-				frame, err := config.OnFocusLost()
-				state.captureFrameLayers(frame, err)
-				return frame, err
-			}
-		}
-		state.accessibility, state.nodes = config.OnAccessibility, config.Accessibility
-		if config.OnShortcut != nil {
-			state.shortcutHandler = func(event KeyEvent) (Frame, bool, error) {
-				frame, handled, err := config.OnShortcut(event)
-				state.captureFrameLayers(frame, err)
-				return frame, handled, err
-			}
-		}
-		if config.OnScroll != nil {
-			state.scrollHandler = func(event ScrollEvent) (Frame, error) {
-				frame, err := config.OnScroll(event)
-				state.captureFrameLayers(frame, err)
-				return frame, err
-			}
-		}
-		if config.OnFileDrop != nil {
-			state.dropHandler = func(event FileDropEvent) (Frame, bool, error) {
-				frame, accepted, err := config.OnFileDrop(event)
-				state.captureFrameLayers(frame, err)
-				return frame, accepted, err
-			}
-		}
-		if config.OnRedraw != nil {
-			state.redrawHandler = func() (Frame, error) {
-				frame, err := config.OnRedraw()
-				state.captureFrameLayers(frame, err)
-				return frame, err
-			}
-		}
-		if config.TextInput != nil {
-			state.setTextInput(config.TextInput)
-		}
-		state.callbackHandle = cgo.NewHandle(state)
+	state.pointerHandler = config.OnPointer
+	state.resizeHandler = config.OnResize
+	state.keyHandler = config.OnKey
+	state.focusLostHandler = config.OnFocusLost
+	state.accessibility, state.nodes = config.OnAccessibility, config.Accessibility
+	state.shortcutHandler = config.OnShortcut
+	state.scrollHandler = config.OnScroll
+	state.dropHandler = config.OnFileDrop
+	state.redrawHandler = config.OnRedraw
+	state.framePresented = config.FramePresented
+	if config.TextInput != nil {
+		state.setTextInput(config.TextInput)
 	}
+	state.callbackHandle = cgo.NewHandle(state)
 	if config.Web != nil {
 		state.web = newWebState(state, config.Web, config.NativeViews)
 		state.webReady = config.Web.Ready
@@ -542,35 +515,6 @@ func nativeStatusError(status C.int) error {
 	default:
 		return fmt.Errorf("darwin: native application failed with status %d", status)
 	}
-}
-
-func (state *runState) captureFrameLayers(frame Frame, err error) {
-	if err == nil && !frame.Update.Empty() {
-		state.captureRectangleLayers(frame.Rectangles)
-	}
-}
-
-func (state *runState) captureRectangleLayers(rectangles []render.Rectangle) {
-	if cap(state.rectangleLayers) < len(rectangles) {
-		state.rectangleLayers = make([]uint16, len(rectangles))
-	} else {
-		state.rectangleLayers = state.rectangleLayers[:len(rectangles)]
-	}
-	for index, rectangle := range rectangles {
-		state.rectangleLayers[index] = rectangle.Layer
-	}
-}
-
-//export vivaRectangleLayer
-func vivaRectangleLayer(handle C.uintptr_t, index C.size_t) C.uint16_t {
-	if handle == 0 {
-		return 0
-	}
-	state := cgo.Handle(handle).Value().(*runState)
-	if uint64(index) >= uint64(len(state.rectangleLayers)) {
-		return 0
-	}
-	return C.uint16_t(state.rectangleLayers[int(index)])
 }
 
 func makeNativeAccessibility(nodes []AccessibilityNode) (unsafe.Pointer, []unsafe.Pointer) {
@@ -798,6 +742,21 @@ func makeNativeTextLabels(labels []TextLabel) (unsafe.Pointer, []unsafe.Pointer,
 			origin_x:        C.float(label.OriginX),
 			origin_y:        C.float(label.OriginY),
 			font_generation: C.uint32_t(label.FontGeneration),
+			shapes_before:   C.uint32_t(label.ShapesBefore),
+		}
+		if label.HasQuad {
+			// The corners and their colours decide where the label's picture
+			// lands; an all-zero quad is the axis-aligned box (see native.h).
+			for corner, point := range label.Quad {
+				native[validCount].quad[corner*2] = C.float(point.X)
+				native[validCount].quad[corner*2+1] = C.float(point.Y)
+			}
+			for corner, tint := range label.Tint {
+				native[validCount].tint[corner*4] = C.float(tint.Red)
+				native[validCount].tint[corner*4+1] = C.float(tint.Green)
+				native[validCount].tint[corner*4+2] = C.float(tint.Blue)
+				native[validCount].tint[corner*4+3] = C.float(tint.Alpha)
+			}
 		}
 		validCount++
 	}
@@ -968,12 +927,13 @@ func nativeTerminalKeyCode(character uint16) input.Key {
 }
 
 type compositeCommand struct {
-	Layer   uint16
-	Kind    uint16
-	First   uint32
-	Count   uint32
-	Clipped bool
-	Clip    scene.Rect
+	Layer    uint16
+	Kind     uint16
+	First    uint32
+	Count    uint32
+	Clipped  bool
+	Clip     scene.Rect
+	Sequence uint32
 }
 
 func planComposite(rectangles []render.Rectangle, labels []TextLabel) ([]compositeCommand, error) {
@@ -990,8 +950,10 @@ func planComposite(rectangles []render.Rectangle, labels []TextLabel) ([]composi
 		}
 	}
 	textLayers := make([]C.uint16_t, len(labels))
+	textShapesBefore := make([]C.uint32_t, len(labels))
 	for index, label := range labels {
 		textLayers[index] = C.uint16_t(label.Layer)
+		textShapesBefore[index] = C.uint32_t(label.ShapesBefore)
 	}
 	nativeCommands := make([]C.viva_composite_command, len(rectangles)+len(labels))
 	var rectanglePointer *C.viva_rectangle
@@ -1004,6 +966,10 @@ func planComposite(rectangles []render.Rectangle, labels []TextLabel) ([]composi
 	if len(textLayers) > 0 {
 		textPointer = &textLayers[0]
 	}
+	var shapesBeforePointer *C.uint32_t
+	if len(textShapesBefore) > 0 {
+		shapesBeforePointer = &textShapesBefore[0]
+	}
 	var commandPointer *C.viva_composite_command
 	if len(nativeCommands) > 0 {
 		commandPointer = &nativeCommands[0]
@@ -1014,6 +980,7 @@ func planComposite(rectangles []render.Rectangle, labels []TextLabel) ([]composi
 		clipPointer,
 		C.size_t(len(nativeRectangles)),
 		textPointer,
+		shapesBeforePointer,
 		C.size_t(len(textLayers)),
 		commandPointer,
 		C.size_t(len(nativeCommands)),
@@ -1025,10 +992,11 @@ func planComposite(rectangles []render.Rectangle, labels []TextLabel) ([]composi
 	commands := make([]compositeCommand, int(count))
 	for index := range commands {
 		commands[index] = compositeCommand{
-			Layer: uint16(nativeCommands[index].layer),
-			Kind:  uint16(nativeCommands[index].kind),
-			First: uint32(nativeCommands[index].first),
-			Count: uint32(nativeCommands[index].count),
+			Layer:    uint16(nativeCommands[index].layer),
+			Kind:     uint16(nativeCommands[index].kind),
+			First:    uint32(nativeCommands[index].first),
+			Count:    uint32(nativeCommands[index].count),
+			Sequence: uint32(nativeCommands[index].sequence),
 		}
 		if nativeCommands[index].clipped != 0 {
 			commands[index].Clipped = true
@@ -1056,6 +1024,19 @@ func labelABI() (labelSize, runsOffset, runSize uintptr) {
 	return unsafe.Sizeof(C.viva_text_label{}),
 		unsafe.Offsetof(C.viva_text_label{}.runs),
 		unsafe.Sizeof(C.viva_text_run{})
+}
+
+// labelQuadABI reports where the quad and tint arrays sit in the label
+// structure shared with native code.
+func labelQuadABI() (quadOffset, tintOffset uintptr) {
+	return unsafe.Offsetof(C.viva_text_label{}.quad),
+		unsafe.Offsetof(C.viva_text_label{}.tint)
+}
+
+// rectangleCapacity is the instance slots the renderer's rectangle buffers
+// need for count instances, given the slots they already hold.
+func rectangleCapacity(capacity, count uintptr) uintptr {
+	return uintptr(C.viva_rectangle_capacity(C.size_t(capacity), C.size_t(count)))
 }
 
 // planLabelReuse runs the native plan that decides which old label texture each

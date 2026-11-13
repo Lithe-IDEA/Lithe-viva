@@ -1,6 +1,9 @@
 package text
 
-import "github.com/vivaui/viva/internal/grapheme"
+import (
+	"github.com/vivaui/viva/internal/bidi"
+	"github.com/vivaui/viva/internal/grapheme"
+)
 
 // Range is a half-open rune range.
 type Range struct {
@@ -17,8 +20,9 @@ type Span struct {
 }
 
 const (
-	maxHistoryEntries = 256
-	maxHistoryRunes   = 256 * 1024
+	maxHistoryEntries     = 256
+	maxHistoryRunes       = 256 * 1024
+	historyPrimitiveRunes = 6
 	// maxSingleEditRunes is the largest edit the history keeps once it is all that
 	// is left: a replace-all in a big file is one undo unit however many runes it
 	// touches, and losing every undo because it is large would cost more than the
@@ -46,6 +50,11 @@ type historyEdit struct {
 	removed, inserted []rune
 	before, after     editorSelection
 	kind              editKind
+	primitives        []Edit
+}
+
+func (edit *historyEdit) retainedRunes() int {
+	return len(edit.removed) + len(edit.inserted) + historyPrimitiveRunes*len(edit.primitives)
 }
 
 type textChange struct {
@@ -53,9 +62,11 @@ type textChange struct {
 	removed, inserted []rune
 }
 
-// Editor retains text, selection, and an optional IME composition range. Like
-// its mutators, String is not safe for concurrent use: it caches the converted
-// text.
+// Editor retains text, selection, and an optional IME composition range.
+// All access must be serialized, including getters: String and CommittedString
+// populate caches. When attached to a window, access it only on that window's
+// thread, where native input and painting run. Read a string snapshot there
+// before starting background work; the returned string remains valid after edits.
 type Editor struct {
 	runes               []rune
 	anchor              int
@@ -64,9 +75,18 @@ type Editor struct {
 	composing           bool
 	compositionOriginal []rune
 	compositionBase     string
+	compositionAnchor   int
+	compositionCaret    int
 	// compositionBaseValid says compositionBase holds the built value. The value
 	// itself may legitimately be empty, so it cannot serve as its own sentinel.
 	compositionBaseValid bool
+	// compositionHistory and its counters are the history a cancel restores. The
+	// provisional composition edit may drop redo, merge, or trim older units.
+	compositionHistory      []historyEdit
+	compositionHistoryIndex int
+	compositionHistoryRunes int
+	compositionCoalescing   editKind
+	compositionHistoryHeld  bool
 
 	// accept and maxRunes constrain what an edit may leave in the text; see
 	// Restrict.
@@ -88,6 +108,7 @@ type Editor struct {
 	// resolved, so a caret that moves or types a little is found by walking from
 	// there instead of from the start; every mutation of runes trims it.
 	offsets offsetMemo
+	journal *editJournal
 
 	history      []historyEdit
 	historyIndex int
@@ -95,10 +116,12 @@ type Editor struct {
 	coalescing   editKind
 
 	// visualStarts, visualOrder and visualOdd are the bidi caret walk's scratch,
-	// reused by every arrow key on a line that needs reordering.
-	visualStarts []int
-	visualOrder  []int
-	visualOdd    []bool
+	// reused by every arrow key on a line that needs reordering, and the
+	// resolver that orders the line keeps its own scratch between them too.
+	visualStarts  []int
+	visualOrder   []int
+	visualOdd     []bool
+	visualResolve bidi.Resolver
 }
 
 // NewEditor creates an editor with its caret at the end of initial text.
@@ -110,8 +133,11 @@ func NewEditor(initial string) *Editor {
 
 // String returns the current UTF-8 text. The conversion is cached until the
 // text next changes, so repeated calls between edits allocate nothing.
+// Like all Editor methods, it is not safe for concurrent use. The returned
+// string is an immutable snapshot that can be passed to background work.
 func (editor *Editor) String() string {
 	if !editor.composing {
+		editor.releaseCompositionHistory()
 		editor.compositionOriginal = nil
 		editor.compositionBase = ""
 		editor.compositionBaseValid = false
@@ -124,6 +150,7 @@ func (editor *Editor) String() string {
 }
 
 // CommittedString returns the text before marked input until the IME commits it.
+// Like String, it populates a cache and is not safe for concurrent use.
 func (editor *Editor) CommittedString() string {
 	if editor.composing {
 		if !editor.compositionBaseValid {
@@ -193,6 +220,7 @@ func (editor *Editor) SetSelection(selection Range) {
 	editor.anchor = anchor
 	editor.caret = caret
 	editor.composing = false
+	editor.releaseCompositionHistory()
 }
 
 // MoveTo puts the caret at rune index, or with extend moves it there from where
@@ -208,6 +236,7 @@ func (editor *Editor) MoveTo(index int, extend bool) {
 		editor.collapse(index)
 	}
 	editor.composing = false
+	editor.releaseCompositionHistory()
 }
 
 // Composition returns the active marked-text range.
@@ -241,6 +270,7 @@ func (editor *Editor) Insert(value string) {
 		kind = editSeparate
 	}
 	editor.record(change, before, editor.selectionState(), kind)
+	editor.releaseCompositionHistory()
 }
 
 // Paste inserts text as one undo unit, separate from adjacent typing.
@@ -264,6 +294,14 @@ func (editor *Editor) SetMarkedText(value string, selected Range) {
 		editor.compositionOriginal = change.removed
 		editor.compositionBase = ""
 		editor.compositionBaseValid = false
+		editor.compositionAnchor = before.anchor
+		editor.compositionCaret = before.caret
+		editor.discardCompositionHistory()
+		editor.compositionHistory = append(editor.compositionHistory[:0], editor.history...)
+		editor.compositionHistoryIndex = editor.historyIndex
+		editor.compositionHistoryRunes = editor.historyRunes
+		editor.compositionCoalescing = editor.coalescing
+		editor.compositionHistoryHeld = true
 	}
 	inserted := len(change.inserted)
 	if inserted == 0 && value != "" {
@@ -272,6 +310,7 @@ func (editor *Editor) SetMarkedText(value string, selected Range) {
 		editor.collapse(target.Start)
 		editor.composing = false
 		editor.record(change, before, editor.selectionState(), editComposition)
+		editor.releaseCompositionHistory()
 		return
 	}
 	editor.composition = Range{Start: target.Start, End: target.Start + inserted}
@@ -285,7 +324,41 @@ func (editor *Editor) SetMarkedText(value string, selected Range) {
 // Unmark commits the current marked text without changing it.
 func (editor *Editor) Unmark() {
 	editor.composing = false
+	editor.releaseCompositionHistory()
 	editor.BreakUndoGroup()
+}
+
+// CancelComposition ends an active composition and restores the text, selection
+// and history it replaced, without creating an undo unit. A composition the
+// input method has already committed or unmarked is left alone: cancellation is
+// an explicit native event, never an empty marked string by itself.
+func (editor *Editor) CancelComposition() bool {
+	if !editor.composing {
+		return false
+	}
+	target := editor.composition
+	editor.replaceExact(target.Start, target.End-target.Start, editor.compositionOriginal)
+	editor.anchor = clamp(editor.compositionAnchor, 0, len(editor.runes))
+	editor.caret = clamp(editor.compositionCaret, 0, len(editor.runes))
+	editor.composing = false
+	editor.composition = Range{}
+	editor.compositionOriginal = nil
+	editor.compositionBase = ""
+	editor.compositionBaseValid = false
+	history := editor.compositionHistory
+	historyIndex := editor.compositionHistoryIndex
+	historyRunes := editor.compositionHistoryRunes
+	coalescing := editor.compositionCoalescing
+	editor.compositionHistory = nil
+	editor.compositionHistoryIndex = 0
+	editor.compositionHistoryRunes = 0
+	editor.compositionCoalescing = 0
+	editor.compositionHistoryHeld = false
+	editor.history = history
+	editor.historyIndex = historyIndex
+	editor.historyRunes = historyRunes
+	editor.coalescing = coalescing
+	return true
 }
 
 // DeleteBackward removes the selection or previous grapheme cluster.
@@ -297,6 +370,7 @@ func (editor *Editor) DeleteBackward() bool {
 	// edit below shortens the text under it, so it ends here rather than keep a
 	// range that no longer exists.
 	editor.composing = false
+	editor.releaseCompositionHistory()
 	caret := editor.caret
 	if caret == 0 {
 		return false
@@ -315,6 +389,7 @@ func (editor *Editor) DeleteForward() bool {
 		return true
 	}
 	editor.composing = false // see DeleteBackward
+	editor.releaseCompositionHistory()
 	caret := editor.caret
 	if caret == len(editor.runes) {
 		return false
@@ -332,6 +407,7 @@ func (editor *Editor) DeleteForward() bool {
 func (editor *Editor) MoveLeft(extend bool) bool {
 	editor.BreakUndoGroup()
 	editor.composing = false
+	editor.releaseCompositionHistory()
 	selection := editor.Selection()
 	if !extend && selection.Start != selection.End {
 		editor.collapse(selection.Start)
@@ -355,6 +431,7 @@ func (editor *Editor) MoveLeft(extend bool) bool {
 func (editor *Editor) MoveRight(extend bool) bool {
 	editor.BreakUndoGroup()
 	editor.composing = false
+	editor.releaseCompositionHistory()
 	selection := editor.Selection()
 	if !extend && selection.Start != selection.End {
 		editor.collapse(selection.End)
@@ -422,6 +499,7 @@ func (editor *Editor) deleteSelectionOrComposition() bool {
 	change := editor.replace(target, "", false)
 	editor.collapse(target.Start)
 	editor.composing = false
+	editor.releaseCompositionHistory()
 	editor.record(change, before, editor.selectionState(), editSeparate)
 	return true
 }
@@ -438,8 +516,6 @@ func (editor *Editor) collapse(index int) {
 // had to replace its last rune.
 func (editor *Editor) replace(target Range, value string, overwrite bool) textChange {
 	target = normalizeRange(target, len(editor.runes))
-	editor.textValid = false
-	editor.offsets.trim(target.Start)
 	replacement := []rune(value)
 	if editor.accept != nil {
 		kept := replacement[:0]
@@ -469,6 +545,17 @@ func (editor *Editor) replace(target Range, value string, overwrite bool) textCh
 		removed:  append([]rune(nil), editor.runes[target.Start:target.End]...),
 		inserted: replacement,
 	}
+	edit := editor.prepareEdit(target.Start, target.End, replacement)
+	var lines *lineJournal
+	var context lineContext
+	if editor.journal != nil {
+		lines = editor.journal.lines
+		if lines != nil {
+			context = editor.prepareLineContext(target.Start, target.End, replacement)
+		}
+	}
+	editor.textValid = false
+	editor.offsets.trim(target.Start)
 	delta := len(replacement) - removed
 	if delta > 0 {
 		editor.runes = append(editor.runes, make([]rune, delta)...)
@@ -478,6 +565,10 @@ func (editor *Editor) replace(target Range, value string, overwrite bool) textCh
 		editor.runes = editor.runes[:len(editor.runes)+delta]
 	}
 	copy(editor.runes[target.Start:], replacement)
+	editor.recordEdit(edit)
+	if lines != nil {
+		editor.recordLineContext(edit, context)
+	}
 	return change
 }
 
@@ -494,7 +585,7 @@ func (editor *Editor) Undo() bool {
 	}
 	editor.historyIndex--
 	edit := &editor.history[editor.historyIndex]
-	editor.replaceExact(edit.start, len(edit.inserted), edit.removed)
+	editor.replaceHistory(edit, true)
 	editor.restoreSelection(edit.before)
 	editor.BreakUndoGroup()
 	return true
@@ -506,7 +597,7 @@ func (editor *Editor) Redo() bool {
 		return false
 	}
 	edit := &editor.history[editor.historyIndex]
-	editor.replaceExact(edit.start, len(edit.removed), edit.inserted)
+	editor.replaceHistory(edit, false)
 	editor.restoreSelection(edit.after)
 	editor.historyIndex++
 	editor.BreakUndoGroup()
@@ -518,12 +609,47 @@ func (editor *Editor) Redo() bool {
 // automatically; applications may call it at another semantic boundary.
 func (editor *Editor) BreakUndoGroup() { editor.coalescing = 0 }
 
-// ClearHistory forgets every undo and redo unit without changing the text.
-func (editor *Editor) ClearHistory() {
+func (editor *Editor) clearHistory() {
+	if editor.journal != nil && editor.journal.lines != nil {
+		editor.journal.lines.batches = nil
+		editor.journal.lines.delivery = nil
+	}
 	editor.history = nil
 	editor.historyIndex = 0
 	editor.historyRunes = 0
 	editor.coalescing = 0
+	if point := editor.savePointIndex(); point != nil {
+		*point = 0
+	}
+}
+
+// ClearHistory forgets every undo and redo unit without changing the text. It
+// also forgets the history a cancel could restore, so a composition active
+// while it is called cannot bring back cleared units.
+func (editor *Editor) ClearHistory() {
+	editor.clearHistory()
+	editor.compositionHistoryIndex = 0
+	editor.compositionHistoryRunes = 0
+	editor.compositionCoalescing = 0
+	editor.releaseCompositionHistory()
+}
+
+func (editor *Editor) releaseCompositionHistory() {
+	if !editor.compositionHistoryHeld {
+		return
+	}
+	editor.compositionHistoryHeld = false
+	if editor.compositionHistory != nil {
+		clear(editor.compositionHistory[:cap(editor.compositionHistory)])
+		editor.compositionHistory = editor.compositionHistory[:0]
+	}
+	editor.compositionHistoryIndex = 0
+	editor.compositionHistoryRunes = 0
+	editor.compositionCoalescing = 0
+}
+
+func (editor *Editor) discardCompositionHistory() {
+	editor.releaseCompositionHistory()
 }
 
 func (editor *Editor) selectionState() editorSelection {
@@ -534,10 +660,11 @@ func (editor *Editor) restoreSelection(selection editorSelection) {
 	editor.anchor = clamp(selection.anchor, 0, len(editor.runes))
 	editor.caret = clamp(selection.caret, 0, len(editor.runes))
 	editor.composing = false
+	editor.releaseCompositionHistory()
 }
 
 func (editor *Editor) record(change textChange, before, after editorSelection, kind editKind) {
-	if runesEqual(change.removed, change.inserted) {
+	if runesEqual(change.removed, change.inserted) && (len(change.removed) == 0 || editor.savePointIndex() == nil) {
 		return
 	}
 	editor.dropRedo()
@@ -545,23 +672,45 @@ func (editor *Editor) record(change textChange, before, after editorSelection, k
 		editor.trimHistory()
 		return
 	}
-	edit := historyEdit{
+	editor.appendHistory(historyEdit{
 		start: change.start, removed: change.removed, inserted: change.inserted,
 		before: before, after: after, kind: kind,
+	})
+}
+
+func (editor *Editor) recordWithPrimitives(change textChange, before, after editorSelection, kind editKind, primitives []Edit) {
+	if len(primitives) == 0 {
+		editor.record(change, before, after, kind)
+		return
 	}
+	if runesEqual(change.removed, change.inserted) && editor.savePointIndex() == nil {
+		return
+	}
+	editor.dropRedo()
+	editor.appendHistory(historyEdit{
+		start: change.start, removed: change.removed, inserted: change.inserted,
+		before: before, after: after, kind: kind,
+		primitives: primitives,
+	})
+}
+
+func (editor *Editor) appendHistory(edit historyEdit) {
 	editor.history = append(editor.history, edit)
 	editor.historyIndex = len(editor.history)
-	editor.historyRunes += len(edit.removed) + len(edit.inserted)
-	if kind == editSeparate {
+	editor.historyRunes += edit.retainedRunes()
+	if edit.kind == editSeparate {
 		editor.coalescing = 0
 	} else {
-		editor.coalescing = kind
+		editor.coalescing = edit.kind
 	}
 	editor.trimHistory()
 }
 
 func (editor *Editor) merge(change textChange, before, after editorSelection, kind editKind) bool {
 	if editor.coalescing != kind || editor.historyIndex == 0 || editor.historyIndex != len(editor.history) {
+		return false
+	}
+	if editor.AtSavePoint() {
 		return false
 	}
 	previous := &editor.history[editor.historyIndex-1]
@@ -605,11 +754,17 @@ func (editor *Editor) merge(change textChange, before, after editorSelection, ki
 }
 
 func (editor *Editor) dropRedo() {
-	if editor.historyIndex == len(editor.history) {
-		return
+	if editor.historyIndex < len(editor.history) {
+		editor.discardRedo()
+	}
+}
+
+func (editor *Editor) discardRedo() {
+	if point := editor.savePointIndex(); point != nil && *point > editor.historyIndex {
+		*point = -1
 	}
 	for index := editor.historyIndex; index < len(editor.history); index++ {
-		editor.historyRunes -= len(editor.history[index].removed) + len(editor.history[index].inserted)
+		editor.historyRunes -= editor.history[index].retainedRunes() + editor.forgetLineBatch(&editor.history[index])
 	}
 	clear(editor.history[editor.historyIndex:])
 	editor.history = editor.history[:editor.historyIndex]
@@ -621,15 +776,24 @@ func (editor *Editor) trimHistory() {
 	remove := 0
 	for len(editor.history)-remove > 1 && (len(editor.history)-remove > maxHistoryEntries || editor.historyRunes > maxHistoryRunes) {
 		edit := editor.history[remove]
-		editor.historyRunes -= len(edit.removed) + len(edit.inserted)
+		editor.historyRunes -= edit.retainedRunes() + editor.forgetLineBatch(&editor.history[remove])
 		remove++
 	}
 	if len(editor.history)-remove == 1 && editor.historyRunes > maxSingleEditRunes {
-		editor.ClearHistory()
+		editor.clearHistory()
+		if point := editor.savePointIndex(); point != nil {
+			*point = -1
+		}
 		return
 	}
 	if remove == 0 {
 		return
+	}
+	if point := editor.savePointIndex(); point != nil && *point >= 0 {
+		*point -= remove
+		if *point < 0 {
+			*point = -1
+		}
 	}
 	copy(editor.history, editor.history[remove:])
 	clear(editor.history[len(editor.history)-remove:])
@@ -640,6 +804,15 @@ func (editor *Editor) trimHistory() {
 func (editor *Editor) replaceExact(start, removed int, replacement []rune) {
 	start = clamp(start, 0, len(editor.runes))
 	end := clamp(start+removed, start, len(editor.runes))
+	edit := editor.prepareEdit(start, end, replacement)
+	var lines *lineJournal
+	var context lineContext
+	if editor.journal != nil {
+		lines = editor.journal.lines
+		if lines != nil {
+			context = editor.prepareLineContext(start, end, replacement)
+		}
+	}
 	delta := len(replacement) - (end - start)
 	if delta > 0 {
 		editor.runes = append(editor.runes, make([]rune, delta)...)
@@ -652,6 +825,10 @@ func (editor *Editor) replaceExact(start, removed int, replacement []rune) {
 	editor.lastReplaceStart = start
 	editor.textValid = false
 	editor.offsets.trim(start)
+	editor.recordEdit(edit)
+	if lines != nil {
+		editor.recordLineContext(edit, context)
+	}
 }
 
 func hasUndoBoundary(value string) bool {

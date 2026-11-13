@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 25
+	ProtocolVersion = 27
 	MaxFrameBytes   = 32 << 20
 	MaxStateBytes   = 8 << 20
 	maxItems        = 200_000
@@ -82,11 +82,14 @@ type PaintRequest struct {
 
 type CanvasSnapshot struct {
 	Rectangles []gfx.Rectangle
-	Shadows    []gfx.Shadow
-	Images     []gfx.Image
-	Texts      []gfx.Text
-	Runs       []gfx.TextRun // the runs Texts refer to by RunFirst and RunCount
-	Hits       []gfx.Hit
+	// Triangles are the canvas's vector-shape triangles; every primitive's
+	// Order places it among the others in paint order.
+	Triangles []gfx.Triangle
+	Shadows   []gfx.Shadow
+	Images    []gfx.Image
+	Texts     []gfx.Text
+	Runs      []gfx.TextRun // the runs Texts refer to by RunFirst and RunCount
+	Hits      []gfx.Hit
 	// HitTexts is dense: one entry per Hits entry, zero for a hit that
 	// declared no text geometry. Placement is not carried across the wire.
 	HitTexts     []gfx.HitText
@@ -466,6 +469,23 @@ func encodeCanvas(value CanvasSnapshot) ([]byte, error) {
 		result.u16(rectangle.Layer)
 		encodeRect(&result, rectangle.ClipOf)
 		result.bool(rectangle.HasClip)
+		result.u32(rectangle.Order)
+	}
+	result.u32(uint32(len(value.Triangles)))
+	for _, triangle := range value.Triangles {
+		for _, point := range triangle.Points {
+			result.f32(point.X)
+			result.f32(point.Y)
+		}
+		encodeColor(&result, triangle.Color)
+		encodeColor(&result, triangle.Shade[0])
+		encodeColor(&result, triangle.Shade[1])
+		result.bool(triangle.Shaded)
+		result.u16(triangle.Layer)
+		result.u8(triangle.EdgeMask)
+		encodeRect(&result, triangle.ClipOf)
+		result.bool(triangle.HasClip)
+		result.u32(triangle.Order)
 	}
 	result.u32(uint32(len(value.Shadows)))
 	for _, shadow := range value.Shadows {
@@ -479,8 +499,7 @@ func encodeCanvas(value CanvasSnapshot) ([]byte, error) {
 		result.u16(shadow.Layer)
 		encodeRect(&result, shadow.ClipOf)
 		result.bool(shadow.HasClip)
-		result.u32(shadow.RectsBefore)
-		result.u32(shadow.TrianglesBefore)
+		result.u32(shadow.Order)
 	}
 	result.u32(uint32(len(value.Images)))
 	for _, image := range value.Images {
@@ -495,6 +514,7 @@ func encodeCanvas(value CanvasSnapshot) ([]byte, error) {
 		result.u16(image.Layer)
 		encodeRect(&result, image.ClipOf)
 		result.bool(image.HasClip)
+		result.u32(image.Order)
 	}
 	result.u32(uint32(len(value.Runs)))
 	for _, run := range value.Runs {
@@ -523,8 +543,19 @@ func encodeCanvas(value CanvasSnapshot) ([]byte, error) {
 		result.u16(text.Layer)
 		encodeRect(&result, text.ClipOf)
 		result.bool(text.HasClip)
+		result.u32(text.Order)
 		result.u32(text.Identity.Owner)
 		result.u64(text.Identity.Item)
+		result.bool(text.HasQuad)
+		if text.HasQuad {
+			for _, point := range text.Quad {
+				result.f32(point.X)
+				result.f32(point.Y)
+			}
+			for _, tint := range text.Tint {
+				encodeColor(&result, tint)
+			}
+		}
 	}
 	result.u32(uint32(len(value.Hits)))
 	for index, hit := range value.Hits {
@@ -572,8 +603,24 @@ func decodeCanvas(data []byte) (CanvasSnapshot, error) {
 	for index := range result.Rectangles {
 		result.Rectangles[index] = gfx.Rectangle{
 			Bounds: decodeRect(&value), Color: decodeColor(&value), Radius: value.f32(), Layer: value.u16(),
-			ClipOf: decodeRect(&value), HasClip: value.bool(),
+			ClipOf: decodeRect(&value), HasClip: value.bool(), Order: value.u32(),
 		}
+	}
+	triangleCount := decodeCount(&value)
+	result.Triangles = make([]gfx.Triangle, triangleCount)
+	for index := range result.Triangles {
+		var triangle gfx.Triangle
+		for point := range triangle.Points {
+			triangle.Points[point] = gfx.Point{X: value.f32(), Y: value.f32()}
+		}
+		triangle.Color = decodeColor(&value)
+		triangle.Shade[0], triangle.Shade[1] = decodeColor(&value), decodeColor(&value)
+		triangle.Shaded = value.bool()
+		triangle.Layer = value.u16()
+		triangle.EdgeMask = value.u8()
+		triangle.ClipOf, triangle.HasClip = decodeRect(&value), value.bool()
+		triangle.Order = value.u32()
+		result.Triangles[index] = triangle
 	}
 	shadowCount := decodeCount(&value)
 	result.Shadows = make([]gfx.Shadow, shadowCount)
@@ -582,7 +629,7 @@ func decodeCanvas(data []byte) (CanvasSnapshot, error) {
 			Bounds: decodeRect(&value), Radius: value.f32(), Color: decodeColor(&value),
 			Style: gfx.ShadowStyle{OffsetX: value.f32(), OffsetY: value.f32(), Blur: value.f32(), Spread: value.f32()},
 			Layer: value.u16(), ClipOf: decodeRect(&value), HasClip: value.bool(),
-			RectsBefore: value.u32(), TrianglesBefore: value.u32(),
+			Order: value.u32(),
 		}
 	}
 	imageCount := decodeCount(&value)
@@ -595,7 +642,7 @@ func decodeCanvas(data []byte) (CanvasSnapshot, error) {
 		}
 		result.Images[index] = gfx.Image{
 			Bitmap: bitmap, Source: decodeRect(&value), Bounds: decodeRect(&value), Layer: value.u16(),
-			ClipOf: decodeRect(&value), HasClip: value.bool(),
+			ClipOf: decodeRect(&value), HasClip: value.bool(), Order: value.u32(),
 		}
 		invalid := bitmap.Width <= 0 || bitmap.Height <= 0 || bitmap.Width > MaxFrameBytes/4 || bitmap.Stride < bitmap.Width*4
 		if !invalid {
@@ -635,7 +682,17 @@ func decodeCanvas(data []byte) (CanvasSnapshot, error) {
 			text.RunFirst, text.RunCount = 0, 0
 		}
 		text.Layer, text.ClipOf, text.HasClip = value.u16(), decodeRect(&value), value.bool()
+		text.Order = value.u32()
 		text.Identity = gfx.TextIdentity{Owner: value.u32(), Item: value.u64()}
+		text.HasQuad = value.bool()
+		if text.HasQuad {
+			for corner := range text.Quad {
+				text.Quad[corner] = gfx.Point{X: value.f32(), Y: value.f32()}
+			}
+			for corner := range text.Tint {
+				text.Tint[corner] = decodeColor(&value)
+			}
+		}
 		result.Texts[index] = text
 	}
 	hitCount := decodeCount(&value)
