@@ -63,6 +63,7 @@ const (
 	wmAllowClose       = 32769
 	wmApplyCursor      = 32770
 	wmRedraw           = 32771
+	wmSetSize          = 0x8052
 	wsOverlappedWindow = 0x00cf0000
 )
 
@@ -412,6 +413,9 @@ func (application *windowsApplication) closeAll() {
 		}
 		return true
 	})
+	// The one cursor this package made — the closed hand Win32 does not ship —
+	// is destroyed once no window can still be showing it.
+	closeGrabbingCursor()
 }
 
 func windowProc(window, kind, first, second uintptr) (result uintptr) {
@@ -443,6 +447,9 @@ func windowProc(window, kind, first, second uintptr) (result uintptr) {
 		if state.setAlwaysOnTop(first != 0) {
 			return 1
 		}
+		return 0
+	case wmSetSize:
+		state.resizeClient(int(first&0xffff), int((first>>16)&0xffff))
 		return 0
 	case wmFullscreen:
 		state.setFullscreen(first != 0)

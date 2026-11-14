@@ -277,6 +277,7 @@ func (painter *painter) pointerEvent(event platform.PointerEvent) (platform.Fram
 			return platform.Frame{}, nil
 		}
 		painter.pointer.SetHovered(gfx.ID{})
+		painter.pointer.SetHoveredRole(gfx.Role(0))
 		return painter.repaintAfterInput()
 	}
 	beforeHovered, beforePressed := painter.pointer.Hovered(), painter.pointer.Pressed()
@@ -341,9 +342,11 @@ func (painter *painter) pointerEvent(event platform.PointerEvent) (platform.Fram
 // application answered and whether focus and the pointer's edge state changed.
 func (painter *painter) pointerStep(event platform.PointerEvent) (result gfx.EventResult, focusChanged, edgeChanged bool) {
 	painter.pointer.SetHovered(gfx.ID{})
+	painter.pointer.SetHoveredRole(gfx.Role(0))
 	if event.Kind != platform.PointerExit {
-		if target, ok := painter.focus.Router().HitTest(event.X, event.Y); ok {
-			painter.pointer.SetHovered(target)
+		if target, ok := painter.focus.Router().HitTestRegion(event.X, event.Y); ok {
+			painter.pointer.SetHovered(target.Target)
+			painter.pointer.SetHoveredRole(target.Role)
 		}
 	}
 	edgeChanged = painter.trackEdge(event)
@@ -856,6 +859,7 @@ func (painter *painter) paintCanvas() {
 	}
 	focused, visible := painter.focus.PaintTarget()
 	painter.canvas.SetInteraction(painter.pointer.Hovered(), painter.pointer.Pressed(), focused, visible)
+	painter.canvas.SetHoveredRole(painter.pointer.HoveredRole())
 	painter.canvas.SetScroll(painter.scrollX, painter.scrollY)
 	painter.canvas.BeginFrame()
 	painter.paint(painter.canvas, painter.size)
@@ -1138,6 +1142,8 @@ func cursorFromHit(cursor gfx.PointerCursor) Cursor {
 		return CursorResizeNESW
 	case gfx.PointerCursorNotAllowed:
 		return CursorNotAllowed
+	case gfx.PointerCursorGrabbing:
+		return CursorGrabbing
 	case gfx.PointerCursorHidden:
 		return CursorHidden
 	case gfx.PointerCursorImage:
@@ -1171,7 +1177,7 @@ func (painter *painter) focusedTextField() (TextInputContext, gfx.TextPlacement,
 		ID: hit.ID, Bounds: hit.Bounds, Layer: hit.Layer, Terminal: hit.Role == gfx.RoleTerminal, TypeAhead: hit.TypeAhead && hit.Role != gfx.RoleTerminal,
 		Multiline: hit.Multiline, ReadOnly: hit.ReadOnly, Secure: hit.Secure,
 		NavigationKeys: hit.NavigationKeys,
-		TextBounds:     text.Bounds, FontSize: text.Size, FontWeight: text.Weight, TextColor: text.Color,
+		TextBounds:     text.Bounds, FontSize: text.Size, FontWeight: text.Weight, TextColor: text.Color, Alignment: text.Alignment,
 		HideNativeOverlays: hit.HideNativeOverlays,
 	}
 	return context, text.Placement, index
@@ -1215,6 +1221,7 @@ func (painter *painter) syncTextInput() platform.TextInputUpdate {
 	}
 	// What the application leaves unset comes from the component's declaration.
 	bounds, fontSize, weight, tint := input.Bounds, input.FontSize, input.Weight, input.Color
+	alignment := input.Alignment
 	if bounds == (gfx.Rect{}) {
 		bounds = context.TextBounds
 		if bounds == (gfx.Rect{}) {
@@ -1232,6 +1239,9 @@ func (painter *painter) syncTextInput() platform.TextInputUpdate {
 	}
 	if tint == (gfx.Color{}) {
 		tint = context.TextColor
+	}
+	if alignment == gfx.AlignLeft {
+		alignment = context.Alignment
 	}
 	if !(fontSize > 0) || math.IsInf(float64(fontSize), 0) {
 		// Every platform refuses an editor without a font size. What neither the
@@ -1252,9 +1262,12 @@ func (painter *painter) syncTextInput() platform.TextInputUpdate {
 		cellWidth, _ = painter.canvas.MonoCellSize(fontSize, input.MonoFace)
 		baseline = painter.canvas.MonoBaseline(fontSize, input.MonoFace, bounds.Height)
 	}
-	alignment := gfx.AlignLeft
-	if !context.Terminal && !context.TypeAhead && placement == nil {
-		alignment = resolveTextInputAlignment(input.Alignment, input.State.Value, input.State.Selection.End)
+	if context.Terminal || context.TypeAhead || placement != nil {
+		// Terminal and self-placed inputs keep the fixed origin they had before
+		// alignment existed.
+		alignment = gfx.AlignLeft
+	} else {
+		alignment = resolveTextInputAlignment(alignment, input.State.Value, input.State.Selection.End)
 	}
 	native := platform.TextInput{
 		Target: context.ID,

@@ -27,6 +27,7 @@ type driverSystem struct {
 	driver         *Driver
 	clipboardImage []byte   // PNG bytes; the clipboard holds this or text, never both
 	clipboardFiles []string // paths of copied files, held beside the text a file manager adds
+	clipboardHTML  string   // the rich flavour SetClipboardHTML last wrote beside the plain one
 	primary        string   // the primary selection (Linux only), private like the clipboard
 	schemes        []string // the URL schemes SetSchemeHandlers declared as registered
 }
@@ -80,9 +81,23 @@ func driverSetClipboardText(value string) (error, bool) {
 	if system == nil {
 		return nil, false
 	}
-	system.driver.clipboard, system.driver.system.clipboardImage, system.driver.system.clipboardFiles = value, nil, nil
+	system.driver.SetClipboard(value)
 	return nil, true
 }
+
+// SetClipboardHTML makes the driver's private clipboard hold both flavours of a
+// rich copy, as SetClipboardHTML does on the system clipboard: html beside alt
+// as the plain text, replacing the image and the files. An empty html writes
+// alt as plain text only, like SetClipboard.
+func (driver *Driver) SetClipboardHTML(html, alt string) {
+	driver.system.clipboardHTML = html
+	driver.clipboard, driver.system.clipboardImage, driver.system.clipboardFiles = alt, nil, nil
+}
+
+// ClipboardHTML is the rich flavour the driver's private clipboard holds, ""
+// when the last copy was plain. The string is the driver's own; do not modify
+// it.
+func (driver *Driver) ClipboardHTML() string { return driver.system.clipboardHTML }
 
 func driverSetClipboardFiles(paths []string) (error, bool) {
 	system := activeDriverSystem.Load()
@@ -90,6 +105,18 @@ func driverSetClipboardFiles(paths []string) (error, bool) {
 		return nil, false
 	}
 	system.driver.SetClipboardFiles(paths)
+	return nil, true
+}
+
+// driverSetClipboardHTML answers the rich copy of a driver-backed run: the
+// driver's private clipboard holds html beside alt as its text, the shape the
+// native paste paths already read, and anything else copied clears both.
+func driverSetClipboardHTML(html, alt string) (error, bool) {
+	system := activeDriverSystem.Load()
+	if system == nil {
+		return nil, false
+	}
+	system.driver.SetClipboardHTML(html, alt)
 	return nil, true
 }
 
@@ -159,6 +186,26 @@ func driverDeleteSecret(service, account string) (error, bool) {
 	defer driverSecrets.Unlock()
 	delete(driverSecrets.values, [2]string{service, account})
 	return nil, true
+}
+
+func driverSendNotification(notification Notification) (error, bool) {
+	system := activeDriverSystem.Load()
+	if system == nil {
+		return nil, false
+	}
+	system.driver.notificationMu.Lock()
+	system.driver.notifications = append(system.driver.notifications, notification)
+	system.driver.notificationMu.Unlock()
+	return nil, true
+}
+
+// Notifications returns the notifications the application sent in this
+// driver-backed run, in order. A Driver has no notification center, so sending
+// one records it instead of showing it.
+func (driver *Driver) Notifications() []Notification {
+	driver.notificationMu.Lock()
+	defer driver.notificationMu.Unlock()
+	return append([]Notification(nil), driver.notifications...)
 }
 
 func driverOpenURL(target string) (error, bool) {
@@ -491,7 +538,7 @@ func (driver *Driver) SetClipboardImage(png []byte) error {
 	}
 	driver.system.clipboardImage = append([]byte(nil), png...)
 	driver.system.clipboardFiles = nil
-	driver.clipboard = ""
+	driver.clipboard, driver.system.clipboardHTML = "", ""
 	return nil
 }
 
@@ -532,5 +579,5 @@ func (driver *Driver) SetClipboardFiles(paths []string) {
 		}
 		names = append(names, filepath.Base(path)...)
 	}
-	driver.clipboard = string(names)
+	driver.clipboard, driver.system.clipboardHTML = string(names), ""
 }

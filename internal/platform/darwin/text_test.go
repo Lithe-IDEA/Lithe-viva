@@ -599,3 +599,30 @@ func TestACanvasOnTheEngineSizesTheTerminalCellByTheFont(t *testing.T) {
 		}
 	}
 }
+
+// The engine reports the thicknesses the face draws its own box drawing lines with, in
+// logical pixels at the size asked: those are the strokes a cell glyph is drawn with, so box
+// drawing geometry weighs what the font's own glyphs weigh. CoreText measures the ink of the
+// light and heavy stems; a face that lacks one answers 0 for it.
+func TestTheEngineReportsTheFontsBoxDrawingStrokes(t *testing.T) {
+	engine := SharedTextEngine()
+	for _, face := range []gfx.MonoFace{gfx.MonoSystem, gfx.MonoFamily("Courier New")} {
+		cell := engine.MonoCell(13, face)
+		if cell.Advance <= 0 {
+			t.Fatalf("face %v: no cell", face)
+		}
+		if cell.Rule <= 0 || cell.Rule >= cell.Advance {
+			t.Errorf("face %v: light line %v of a cell %v wide, want a positive stroke narrower than the cell", face, cell.Rule, cell.Advance)
+		}
+		if cell.HeavyRule > 0 && cell.HeavyRule < cell.Rule {
+			t.Errorf("face %v: heavy line %v is thinner than the light one %v", face, cell.HeavyRule, cell.Rule)
+		}
+		at26 := engine.MonoCell(26, face)
+		if at26.Rule <= cell.Rule {
+			t.Errorf("face %v: light line %v at 26, %v at 13, want it to follow the size", face, at26.Rule, cell.Rule)
+		}
+		if cell.HeavyRule > 0 && at26.HeavyRule <= cell.HeavyRule {
+			t.Errorf("face %v: heavy line %v at 26, %v at 13, want it to follow the size", face, at26.HeavyRule, cell.HeavyRule)
+		}
+	}
+}
