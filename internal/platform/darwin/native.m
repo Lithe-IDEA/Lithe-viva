@@ -138,18 +138,20 @@ static CGFloat viva_traffic_light_center(NSWindow *window) {
  * inside it and clickable, and each button is set that far below the top.
  * Idempotent. AppKit puts the buttons back at the system's height on every
  * layout, so callers place them again whenever a button or the container
- * reports a frame change (see keepTrafficLightsCentered). A strip no taller
- * than the system's, and a full screen window, keep the system's layout. */
-static void viva_place_traffic_lights(NSWindow *window, CGFloat stripHeight) {
-    if (window == nil || stripHeight <= VIVA_DEFAULT_TITLEBAR_HEIGHT ||
-        (window.styleMask & NSWindowStyleMaskFullScreen) != 0) {
+ * reports a frame change (see keepTrafficLightsCentered). A scale in (0, 1)
+ * shrinks the buttons around their original centers whether or not the strip
+ * is taller; a strip no taller than the system's keeps the system's positions,
+ * and a full screen window keeps the system's layout. */
+static void viva_place_traffic_lights(NSWindow *window, CGFloat stripHeight, CGFloat scale) {
+    if (window == nil || (window.styleMask & NSWindowStyleMaskFullScreen) != 0) {
         return;
     }
+    BOOL taller = stripHeight > VIVA_DEFAULT_TITLEBAR_HEIGHT;
     NSView *container = viva_titlebar_container(window);
     if (container == nil || container.superview == nil) {
         return;
     }
-    if (fabs(NSHeight(container.frame) - stripHeight) > 0.25) {
+    if (taller && fabs(NSHeight(container.frame) - stripHeight) > 0.25) {
         NSRect frame = container.frame;
         frame.size.height = stripHeight;
         frame.origin.y = NSHeight(container.superview.bounds) - stripHeight;
@@ -158,6 +160,26 @@ static void viva_place_traffic_lights(NSWindow *window, CGFloat stripHeight) {
     for (int index = 0; index < 3; index++) {
         NSView *button = [window standardWindowButton:viva_traffic_buttons[index]];
         if (button == nil || button.superview == nil) {
+            continue;
+        }
+        // Keep the original drawing coordinates while shrinking the view frame.
+        // Using bounds makes repeated AppKit layout notifications idempotent.
+        if (isfinite(scale) && scale > 0 && scale < 1) {
+            NSSize originalSize = button.bounds.size;
+            NSSize targetSize = NSMakeSize(originalSize.width * scale, originalSize.height * scale);
+            if (fabs(NSWidth(button.frame) - targetSize.width) > 0.01 ||
+                fabs(NSHeight(button.frame) - targetSize.height) > 0.01) {
+                NSRect frame = button.frame;
+                frame.origin.x += (frame.size.width - targetSize.width) / 2.0;
+                // Keep the vertical center too, so the shrink holds in a strip of the
+                // system's height where the placement below does not run.
+                frame.origin.y += (frame.size.height - targetSize.height) / 2.0;
+                frame.size = targetSize;
+                button.frame = frame;
+                button.bounds = NSMakeRect(0, 0, originalSize.width, originalSize.height);
+            }
+        }
+        if (!taller) {
             continue;
         }
         CGFloat y = NSHeight(button.superview.bounds) - stripHeight / 2.0 - NSHeight(button.frame) / 2.0;
@@ -6094,6 +6116,8 @@ static void viva_set_secure_event_input(BOOL on) {
     BOOL _scrollEventsEnabled;
     int _windowMode;
     CGFloat _titlebarHeight;
+    CGFloat _trafficLightScale;
+    BOOL _placingTrafficLights;
     NSMutableArray<NSView *> *_titlebarWatched; /* views whose frame changes re-center the traffic lights */
     BOOL _fullscreenTarget;
     BOOL _fullscreenTransition;
@@ -6108,6 +6132,7 @@ static void viva_set_secure_event_input(BOOL on) {
 }
 
 - (void)updateMinimumSize;
+- (void)setVivaContentSize:(NSSize)size;
 
 - (instancetype)initWithConfig:(viva_window_config)config
                          device:(id<MTLDevice>)device
@@ -6206,6 +6231,7 @@ static void viva_set_secure_event_input(BOOL on) {
         _scrollEventsEnabled = scrollEventsEnabled;
         _windowMode = windowMode;
         _titlebarHeight = config.titlebar_height > 0 ? config.titlebar_height : VIVA_DEFAULT_TITLEBAR_HEIGHT;
+        _trafficLightScale = config.traffic_light_scale;
         _closeInterceptEnabled = closeInterceptEnabled;
         _callbackHandle = callbackHandle;
         _hasAnchor = config.has_anchor != 0;
@@ -6554,8 +6580,22 @@ static void viva_set_secure_event_input(BOOL on) {
  * or the container, so the placement is redone in that very pass and the
  * buttons are never drawn at the system's height. Entering and leaving full
  * screen replaces the container, so the watched views are collected again. */
+// Frame notifications may fire synchronously between setting frame and bounds.
+// Suppress reentry until the scaled drawing coordinates are fully restored.
+- (void)placeTrafficLights {
+    if (_placingTrafficLights) {
+        return;
+    }
+    _placingTrafficLights = YES;
+    @try {
+        viva_place_traffic_lights(_window, _titlebarHeight, _trafficLightScale);
+    } @finally {
+        _placingTrafficLights = NO;
+    }
+}
+
 - (void)keepTrafficLightsCentered {
-    viva_place_traffic_lights(_window, _titlebarHeight);
+    [self placeTrafficLights];
     if (_titlebarWatched == nil) {
         _titlebarWatched = [[NSMutableArray alloc] init];
     }
@@ -6582,7 +6622,7 @@ static void viva_set_secure_event_input(BOOL on) {
 
 - (void)titlebarChanged:(NSNotification *)notification {
     (void)notification;
-    viva_place_traffic_lights(_window, _titlebarHeight);
+    [self placeTrafficLights];
 }
 
 /* AppKit reports some of the buttons' moves a turn of the run loop late, so the
@@ -6590,7 +6630,7 @@ static void viva_set_secure_event_input(BOOL on) {
 - (void)windowDidResize:(NSNotification *)notification {
     (void)notification;
     if (_windowMode == VIVA_WINDOW_CUSTOM_TITLEBAR) {
-        viva_place_traffic_lights(_window, _titlebarHeight);
+        [self placeTrafficLights];
     }
     [self reportFrameChange];
 }
@@ -6688,7 +6728,7 @@ static void viva_set_secure_event_input(BOOL on) {
          * button back at the system's height without reporting the move as a
          * frame change, so keepTrafficLightsCentered never hears of it. */
         if (_windowMode == VIVA_WINDOW_CUSTOM_TITLEBAR) {
-            viva_place_traffic_lights(_window, _titlebarHeight);
+            viva_place_traffic_lights(_window, _titlebarHeight, _trafficLightScale);
         }
     }
 }
@@ -6867,6 +6907,32 @@ static void viva_set_secure_event_input(BOOL on) {
     NSRect content = [_window contentRectForFrameRect:_window.frame];
     content.origin = NSMakePoint(origin.x, primaryHeight - origin.y - content.size.height);
     [_window setFrame:[_window frameRectForContentRect:content] display:NO];
+}
+
+/* Changes the content area while keeping its current top-left origin. */
+- (void)setVivaContentSize:(NSSize)size {
+    if (_window == nil || !_running || _window.miniaturized || _window.zoomed ||
+        (_window.styleMask & NSWindowStyleMaskFullScreen) != 0) {
+        return;
+    }
+    NSRect current = [_window contentRectForFrameRect:_window.frame];
+    NSSize minimum = _window.contentMinSize;
+    size.width = MAX(size.width, minimum.width);
+    size.height = MAX(size.height, minimum.height);
+    NSScreen *screen = _window.screen ?: NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+    if (screen != nil) {
+        NSRect available = [_window contentRectForFrameRect:screen.visibleFrame];
+        size.width = MIN(size.width, available.size.width);
+        size.height = MIN(size.height, available.size.height);
+    }
+    NSRect wanted = NSMakeRect(current.origin.x, NSMaxY(current) - size.height, size.width, size.height);
+    NSRect frame = [_window frameRectForContentRect:wanted];
+    if (screen != nil) {
+        NSRect work = screen.visibleFrame;
+        frame.origin.x = MAX(NSMinX(work), MIN(frame.origin.x, NSMaxX(work) - frame.size.width));
+        frame.origin.y = MAX(NSMinY(work), MIN(frame.origin.y, NSMaxY(work) - frame.size.height));
+    }
+    [_window setFrame:frame display:YES];
 }
 
 /* The content area in top-left screen coordinates; NO before the window exists. */
@@ -7410,6 +7476,13 @@ void viva_application_move_window(void *window, double x, double y) {
     }
 }
 
+void viva_application_set_window_size(void *window, double width, double height) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        VivaAppDelegate *delegate = viva_find_window(window);
+        [delegate setVivaContentSize:NSMakeSize(width, height)];
+    });
+}
+
 void viva_application_hide_window(void *window) {
     viva_post_window_event(VIVA_HIDE_EVENT, window);
 }
@@ -7766,8 +7839,8 @@ int viva_measure_text(
     }
 }
 
-int viva_measure_mono(double font_size, int mono_face, double *advance, double *ascent, double *descent, double *leading) {
-    if (advance == NULL || ascent == NULL || descent == NULL || leading == NULL || font_size <= 0) {
+int viva_measure_mono(double font_size, int mono_face, double *advance, double *ascent, double *descent, double *leading, double *rule, double *heavy) {
+    if (advance == NULL || ascent == NULL || descent == NULL || leading == NULL || rule == NULL || heavy == NULL || font_size <= 0) {
         return 1;
     }
     @autoreleasepool {
@@ -7789,6 +7862,23 @@ int viva_measure_mono(double font_size, int mono_face, double *advance, double *
         *ascent = CTFontGetAscent(font);
         *descent = CTFontGetDescent(font);
         *leading = CTFontGetLeading(font);
+        // The weight of the face's own box drawing lines: the ink width of a light and a
+        // heavy stem, which the face may draw at a different weight than its underline.
+        // The lookup answers false when either is missing, and still fills the other, so
+        // each glyph is checked on its own.
+        *rule = 0;
+        *heavy = 0;
+        UniChar boxCharacters[2] = {0x2502, 0x2503};  /* │ ┃ */
+        CGGlyph boxGlyphs[2] = {0, 0};
+        CTFontGetGlyphsForCharacters(font, boxCharacters, boxGlyphs, 2);
+        CGRect bounds[2] = {CGRectZero, CGRectZero};
+        CTFontGetBoundingRectsForGlyphs(font, kCTFontOrientationHorizontal, boxGlyphs, bounds, 2);
+        if (boxGlyphs[0] != 0) {
+            *rule = bounds[0].size.width;
+        }
+        if (boxGlyphs[1] != 0) {
+            *heavy = bounds[1].size.width;
+        }
         CFRelease(font);
         return *advance > 0 ? 0 : 4;
     }
