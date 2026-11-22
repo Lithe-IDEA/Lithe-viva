@@ -1,0 +1,35 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/vivaui/viva/base
+cpu: Apple M4
+BenchmarkPR349Wheel/page-10         	 3893965	       299.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPR349Wheel/panel-10        	50819913	        23.67 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/vivaui/viva/base
+cpu: Apple M4
+BenchmarkPR349Wheel/page-10         	 4042330	       321.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPR349Wheel/panel-10        	49340836	        24.22 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/vivaui/viva/base
+cpu: Apple M4
+BenchmarkPR349Wheel/page-10         	 3788222	       316.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPR349Wheel/panel-10        	50863442	        23.59 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/vivaui/viva/base
+cpu: Apple M4
+BenchmarkPR349Wheel/page-10         	 3485056	       331.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPR349Wheel/panel-10        	50848892	        23.66 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/vivaui/viva/base
+cpu: Apple M4
+BenchmarkPR349Wheel/page-10         	 1000000	      2494 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPR349Wheel/panel-10        	21052046	       134.3 ns/op	       0 B/op	       0 allocs/op
+PASS

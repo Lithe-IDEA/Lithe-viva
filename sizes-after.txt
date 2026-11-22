@@ -1,0 +1,4 @@
+=== RUN   TestPR349RoutingSizes
+    pr349_wheel_bench_test.go:50: fieldEntry=32 tableRoute=48 drawerState=168
+--- PASS: TestPR349RoutingSizes (0.00s)
+PASS
