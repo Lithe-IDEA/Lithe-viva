@@ -19,8 +19,12 @@ func nativeClipboardFiles() ([]string, error) { return windowsplatform.Clipboard
 
 func nativeSetClipboardFiles(paths []string) error { return windowsplatform.SetClipboardFiles(paths) }
 
-func nativeStartFileDrag(paths []string, allowed FileDragEffect) (FileDragEffect, error) {
+func nativeStartFileDrag(paths []string, allowed FileDragEffect) error {
 	return windowsplatform.StartFileDrag(paths, allowed)
+}
+
+func nativeStartFilePromiseDrag(files []FilePromise) error {
+	return windowsplatform.StartFilePromiseDrag(files)
 }
 
 func nativeReduceMotion() bool { return windowsplatform.ReduceMotion() }
@@ -55,7 +59,7 @@ func nativeOpenFiles(options OpenFileOptions) ([]string, error) {
 }
 
 func nativeOpenDirectory(options OpenDirectoryOptions) (string, error) {
-	path, canceled, err := windowsplatform.OpenDirectory(windowsplatform.OpenDirectoryOptions{Title: options.Title})
+	path, canceled, err := windowsplatform.OpenDirectory(windowsplatform.OpenDirectoryOptions{Title: options.Title, InitialDirectory: options.InitialDirectory})
 	if canceled {
 		return "", ErrCanceled
 	}

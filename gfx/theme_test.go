@@ -139,3 +139,34 @@ func TestTextInsetFollowsControlPadding(t *testing.T) {
 		t.Fatalf("inset does not follow density: compact %v, large %v", compact, large)
 	}
 }
+
+// A shape outside a square corner is square too; around a rounded one it grows
+// with the distance.
+func TestRadiusOutset(t *testing.T) {
+	if got := RadiusOutset(0, 4); got != 0 {
+		t.Errorf("outset of a square corner = %v, want 0", got)
+	}
+	if got := RadiusOutset(7.5, 3); got != 10.5 {
+		t.Errorf("outset of 7.5 by 3 = %v, want 10.5", got)
+	}
+	square := DefaultMetrics()
+	square.RadiusControl, square.RadiusSurface = 0, 0
+	if square.RadiusItem() != 0 || square.RadiusPopup() != 0 {
+		t.Errorf("a square theme derives item %v and popup %v radii, want 0", square.RadiusItem(), square.RadiusPopup())
+	}
+}
+
+// A theme that does not set Warning paints a warning in Danger, never in a
+// transparent color; the stock themes set their own.
+func TestWarningColorFallsBackToDanger(t *testing.T) {
+	var bare Theme
+	bare.Danger = RGB(200, 0, 0)
+	if bare.WarningColor() != bare.Danger {
+		t.Fatalf("WarningColor of a theme without Warning = %+v, want Danger", bare.WarningColor())
+	}
+	for name, theme := range map[string]Theme{"light": LightTheme(), "dark": DarkTheme()} {
+		if theme.Warning == (Color{}) || theme.WarningColor() != theme.Warning {
+			t.Fatalf("%s theme has no Warning of its own", name)
+		}
+	}
+}

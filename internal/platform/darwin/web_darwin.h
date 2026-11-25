@@ -19,7 +19,7 @@ void *viva_application_window_view(void *token);
 // with an error on an older system rather than opened in the default store.
 void *viva_web_open(void *view, uint32_t id, uintptr_t handle, const char *url, const char *html,
                     const char *base, const char *script, int main_frame_only, const char *scheme, int ephemeral, int direct,
-                    const char *partition, char **error);
+                    const char *user_agent_suffix, const char *partition, char **error);
 int viva_web_direct_supported(void);
 // viva_web_partition_supported answers whether this system can name the persistent store a partition uses.
 int viva_web_partition_supported(void);
@@ -30,6 +30,9 @@ void viva_web_back(void *web);
 void viva_web_forward(void *web);
 void viva_web_eval(void *web, const char *script);
 void viva_web_focus(void *web);
+// viva_web_show_dev_tools makes the page inspectable and opens Web Inspector for it: 1 when it was
+// opened, 0 when this WebKit has no way to open it from the application.
+int viva_web_show_dev_tools(void *web);
 // viva_web_title is the title of the page's current document, as a malloc'd UTF-8 string which the
 // caller frees, and an empty string when it has none. viva_web_can_go_back,
 // viva_web_can_go_forward and viva_web_is_loading answer the page's history and its loading, 1 or 0.

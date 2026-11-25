@@ -44,9 +44,12 @@ func nativeSetClipboardFiles(paths []string) error {
 	return linuxSystemError(linuxplatform.SetClipboardFiles(paths))
 }
 
-func nativeStartFileDrag(paths []string, allowed FileDragEffect) (FileDragEffect, error) {
-	effect, err := linuxplatform.StartFileDrag(paths, allowed)
-	return effect, linuxSystemError(err)
+func nativeStartFileDrag(paths []string, allowed FileDragEffect) error {
+	return linuxSystemError(linuxplatform.StartFileDrag(paths, allowed))
+}
+
+func nativeStartFilePromiseDrag(files []FilePromise) error {
+	return linuxSystemError(linuxplatform.StartFilePromiseDrag(files))
 }
 
 func nativeClipboardImagePNG() ([]byte, error) {
@@ -81,7 +84,7 @@ func nativeOpenFiles(options OpenFileOptions) ([]string, error) {
 }
 
 func nativeOpenDirectory(options OpenDirectoryOptions) (string, error) {
-	path, canceled, err := linuxplatform.OpenDirectory(linuxplatform.OpenDirectoryOptions{Title: options.Title})
+	path, canceled, err := linuxplatform.OpenDirectory(linuxplatform.OpenDirectoryOptions{Title: options.Title, InitialDirectory: options.InitialDirectory})
 	if canceled {
 		return "", ErrCanceled
 	}

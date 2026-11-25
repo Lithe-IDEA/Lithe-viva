@@ -127,8 +127,14 @@ func (tree *Tree) Item(item TreeItem) TreeRow {
 		if item.Disabled {
 			color.Alpha *= 0.50
 		}
-		tree.paintDisclosure(disclosure, item.Expanded, color)
-		if !item.DisclosureID.IsZero() {
+		if item.Loading {
+			spinner := tree.theme
+			spinner.Foreground = color
+			PaintSpinner(tree.canvas, spinner, disclosure, SpinnerPhase(item.Phase))
+		} else {
+			tree.paintDisclosure(disclosure, item.Expanded, color)
+		}
+		if !item.DisclosureID.IsZero() && !item.Loading {
 			tree.canvas.HitWithOptions(item.DisclosureID, disclosure, item.Label, gfx.HitOptions{
 				Role: gfx.RoleButton, Disabled: item.Disabled, Expanded: item.Expanded, Expandable: true,
 			})

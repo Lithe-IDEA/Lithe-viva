@@ -14,12 +14,79 @@ with its own predecessor, not with whatever the application is on.
 ## Incompatible changes
 
 Newest first. This guide covers the incompatible changes documented here from
-v0.2.2 through v0.6.0, including package moves as well as removed members and
-changed signatures. Read every entry newer than the application's current
-version, together with the corresponding [release notes](releases/). For a
-target newer than v0.6.0, also check its intervening release notes; this page is
-not a promise that later releases only add API. Releases before v0.2.2 are not
+v0.2.2 through v0.6.0 and in v0.6.8, including package moves as well as removed
+members and changed signatures. Read every entry newer than the application's
+current version, together with the corresponding [release notes](releases/). For
+a target between or newer than those, also check its intervening release notes;
+this page is not a promise that other releases only add API. Releases before v0.2.2 are not
 covered: the release-note archive begins there.
+
+### Unreleased - `ui.Configure` routes files dragged from the system
+
+`ui.Configure` now sets the window's `OnFileDrop`: it gives the files to the
+`FileDropState` area (`Box.DropFiles`) under them, then to the `OnFileDrop` you
+passed when no area is there. An application that sets its own `OnFileDrop` and
+declares no area sees the same events as before. `ui.Host` has an `OnFileDrop`
+field for a host that calls `Page.Attach` itself.
+
+### Unreleased - a `ui.Table` column carries its own title and sort flag
+
+`TableSpec.Headers` and `TableSpec.Sortable` are removed; each `TableColumn` has a
+`Title` and a `Sortable` instead, so adding, dropping or reordering a column is one
+edit rather than three slices that must stay the same length.
+
+- `Columns: cols, Headers: []string{"Name", "Age"}, Sortable: []bool{true, false}`
+  becomes `Columns: []ui.TableColumn{{Title: "Name", Width: 160, Sortable: true},
+  {Title: "Age"}}`.
+- A table none of whose columns has a `Title` has no header row.
+- A table given `Headers` and no `Columns` shared its width between the columns.
+  Write one `TableColumn{Title: ...}` per column, with no `Width`: a table none of
+  whose columns has a width shares its own width equally, and leaves the slice you
+  declared as you wrote it.
+- `components.Table` is unchanged: it still takes `Header(headings)` separately and
+  ignores `Title` and `Sortable`.
+
+### Unreleased - identity options and required specs
+
+The `...ID` and `...With` twins of a control are removed; each control has one
+function.
+
+- `ui.TextFieldID`, `ui.TextAreaID`, `ui.RadioID`, `ui.SelectID` and
+  `ui.ColorPickerID` are removed. The identity goes at the end of the plain
+  function as an option, which is optional and costs no allocation:
+  `ui.TextFieldID(c, id, &m.query, "Search", "")` becomes
+  `ui.TextField(c, &m.query, "Search", "", ui.WithID(id))`, and the others
+  move `id` the same way. A `*string` given to `ui.TextArea` can now be named too.
+- `ui.PopoverWith` is now `ui.Popover`, and `ui.ModalWith` is now `ui.Modal`; both
+  take their spec before the body, as `ui.Drawer` does. The old plain forms gain a
+  spec: `ui.Modal(c, &open, title, body, footer)` becomes
+  `ui.Modal(c, &open, title, ui.ModalSpec{}, body, footer)`, and
+  `ui.Popover(c, anchor, &open, body)` becomes
+  `ui.Popover(c, anchor, &open, ui.PopoverSpec{Align: ui.Start}, body)`. The plain
+  popover lined up with the anchor's start; a zero `PopoverSpec` centers it, so
+  write `Align: ui.Start` to keep the old look.
+
+### v0.6.8 - `ui.Run` takes a `PageConfig`, and four more signatures
+
+A program that follows the guides on `main` before v0.6.8 does not compile
+against v0.6.7: the guides describe the signatures below. Moving to v0.6.8 makes
+them match.
+
+- `ui.Run(config, m.page)` becomes `ui.Run(config, ui.PageConfig{View: m.page})`.
+  `Theme`, `Styles` and the rest of the page's settings now go in the same
+  `PageConfig`, so a one-window program no longer needs `NewPage`, `Configure`
+  and `RunCanvas`.
+- `app.TitlebarInsets()` is removed: the insets differ per window and per moment
+  (none in full screen or under a system titlebar). Read them in the page with
+  `c.TitlebarInsets()`, or from `Canvas.TitlebarInsets` in a custom painter.
+- `ui.AlertDialog(c, spec)` becomes `ui.AlertDialog(c, &open, spec)` and returns
+  `true` on the paint where the confirming action was chosen, as `ui.Modal`
+  opens on a `*bool`. `PopoverWith(c, anchor, spec, &open, onClose)` becomes
+  `PopoverWith(c, anchor, &open, spec, onClose)`. The same changes apply to the
+  `base` package.
+- `ui.TextFieldID` is now generic over `*Field` and `*string`. Calls compile as
+  before; only code that takes the function as a value, such as
+  `f := ui.TextFieldID`, must name a type argument.
 
 ### v0.6.0 - package moves and Page-only authoring
 

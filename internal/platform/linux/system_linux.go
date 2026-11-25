@@ -22,6 +22,16 @@ const (
 	maxClipboardBytes = 64 << 20
 	clipboardWait     = 3 * time.Second
 	dialogSeparator   = "\x1f"
+	// clipboardFocusWindow is how long after this window gains the keyboard a
+	// missing CLIPBOARD owner is still the hand-off from the window that was
+	// left, not an empty clipboard. The owner is published on focus, and a paste
+	// in that moment otherwise reads nothing and the shortcut has already been
+	// consumed.
+	clipboardFocusWindow = 500 * time.Millisecond
+	// clipboardOwnerWait bounds that wait. An empty clipboard must not sit for
+	// clipboardWait.
+	clipboardOwnerWait = 250 * time.Millisecond
+	clipboardOwnerPoll = 15 * time.Millisecond
 )
 
 var ErrUnsupported = errors.New("linux: system integration is unsupported")
@@ -39,6 +49,8 @@ type OpenFileOptions struct {
 
 type OpenDirectoryOptions struct {
 	Title string
+	// InitialDirectory is the starting folder. Empty uses the platform default.
+	InitialDirectory string
 }
 
 type SaveFileOptions struct {
@@ -67,7 +79,9 @@ func ClipboardText() (string, error) {
 func readClipboardX11() (string, error) { return readSelectionTextX11("CLIPBOARD") }
 
 // readSelectionTextX11 asks the owner of a selection (CLIPBOARD, PRIMARY) for its text; empty
-// when nobody owns it.
+// when nobody owns it. Just after this window gains the keyboard the previous owner may
+// already have dropped the selection and the next one not claimed it, so an empty answer
+// in that moment is waited out instead of reported as an empty clipboard.
 func readSelectionTextX11(name string) (string, error) {
 	api, connection, requestor, selection, owner, err := openSelectionRequest(name)
 	if err != nil {
@@ -75,7 +89,17 @@ func readSelectionTextX11(name string) (string, error) {
 	}
 	defer closeClipboardRequest()
 	if owner == xcbAtomNone {
-		return "", nil
+		deadline, wait := clipboardHandoffDeadline()
+		if !wait {
+			return "", nil
+		}
+		owner, err = awaitSelectionOwner(api, connection, selection, deadline)
+		if err != nil {
+			return "", err
+		}
+		if owner == xcbAtomNone {
+			return "", nil
+		}
 	}
 	property, err := api.atom(connection, "VIVA_CLIPBOARD_TEXT")
 	if err != nil {
@@ -141,6 +165,42 @@ func readSelectionTextX11(name string) (string, error) {
 		return readLegacySelection(api, connection, requestor, selection, property)
 	}
 	return "", nil
+}
+
+// clipboardHandoffDeadline reports whether a clipboard read is still inside the
+// focus hand-off, and until when it should wait for an owner.
+func clipboardHandoffDeadline() (time.Time, bool) {
+	win := activeWindow.Load()
+	if win == nil {
+		return time.Time{}, false
+	}
+	at := win.clipboardFocusedAt.Load()
+	if at == 0 {
+		return time.Time{}, false
+	}
+	age := time.Duration(monotonicNow() - at)
+	if age < 0 || age >= clipboardFocusWindow {
+		return time.Time{}, false
+	}
+	return time.Now().Add(clipboardOwnerWait), true
+}
+
+// awaitSelectionOwner polls the selection owner until one appears or deadline
+// passes. The caller has already seen none, so the first look waits a poll
+// interval rather than asking again immediately.
+func awaitSelectionOwner(api *xcbAPI, connection uintptr, selection uint32, deadline time.Time) (uint32, error) {
+	for time.Now().Before(deadline) {
+		pause := clipboardOwnerPoll
+		if remaining := time.Until(deadline); pause > remaining {
+			pause = remaining
+		}
+		time.Sleep(pause)
+		owner, err := selectionOwner(api, connection, selection)
+		if err != nil || owner != xcbAtomNone {
+			return owner, err
+		}
+	}
+	return xcbAtomNone, nil
 }
 
 // HasClipboardImage reports whether the X11 CLIPBOARD owner offers image/png.
@@ -568,8 +628,10 @@ func waitForNewValue(api *xcbAPI, connection uintptr, requestor, property uint32
 			return fmt.Errorf("linux: clipboard owner stopped sending the image within %s", clipboardWait)
 		}
 		milliseconds := max(remaining.Milliseconds(), 1)
-		ready := api.poll(file, 1, int32(min(milliseconds, int64(^uint32(0)>>1))))
-		runtime.KeepAlive(file)
+		ready, interrupted := pollSelection(api, file, int32(min(milliseconds, int64(^uint32(0)>>1))))
+		if interrupted {
+			continue
+		}
 		if ready < 0 || api.connectionHasError(connection) != 0 {
 			return fmt.Errorf("linux: wait for clipboard chunk failed")
 		}
@@ -934,9 +996,12 @@ func openDirectoryDialogArguments(backend string, options OpenDirectoryOptions) 
 		if options.Title != "" {
 			arguments = append(arguments, "--title="+options.Title)
 		}
+		if options.InitialDirectory != "" {
+			arguments = append(arguments, "--filename="+strings.TrimRight(options.InitialDirectory, "/")+"/")
+		}
 		return arguments, nil
 	case "kdialog":
-		arguments := []string{"--getexistingdirectory", ""}
+		arguments := []string{"--getexistingdirectory", options.InitialDirectory}
 		if options.Title != "" {
 			arguments = append(arguments, "--title", options.Title)
 		}
@@ -1185,8 +1250,10 @@ func waitForSelection(api *xcbAPI, connection uintptr, requestor, selection, tar
 		if milliseconds > int64(^uint32(0)>>1) {
 			milliseconds = int64(^uint32(0) >> 1)
 		}
-		ready := api.poll(&file, 1, int32(milliseconds))
-		runtime.KeepAlive(&file)
+		ready, interrupted := pollSelection(api, &file, int32(milliseconds))
+		if interrupted {
+			continue
+		}
 		if ready == 0 {
 			return nil, fmt.Errorf("linux: clipboard owner did not respond within %s", timeout)
 		}
@@ -1197,6 +1264,15 @@ func waitForSelection(api *xcbAPI, connection uintptr, requestor, selection, tar
 			return nil, fmt.Errorf("linux: clipboard XCB connection failed")
 		}
 	}
+}
+
+func pollSelection(api *xcbAPI, file *pollFD, milliseconds int32) (int32, bool) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	ready := api.poll(file, 1, milliseconds)
+	interrupted := ready < 0 && *api.errnoLocation() == errnoINTR
+	runtime.KeepAlive(file)
+	return ready, interrupted
 }
 
 func latin1Clipboard(value string) []byte {

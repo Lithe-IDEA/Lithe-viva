@@ -55,6 +55,17 @@ func (m Metrics) RadiusItem() float32 { return max(m.RadiusControl-2, 0) }
 // dialog or card surface (RadiusSurface).
 func (m Metrics) RadiusPopup() float32 { return max(m.RadiusSurface-1, 0) }
 
+// RadiusOutset is the corner radius of a shape that stands by pixels outside one
+// of radius: a focus ring, a surface with a border around it, or a card larger
+// than a control. A square corner has nothing to follow and stays square, so a
+// theme whose radii are zero is square throughout and not rounded by the offsets.
+func RadiusOutset(radius, by float32) float32 {
+	if radius <= 0 {
+		return 0
+	}
+	return radius + by
+}
+
 // RadiusFull is a corner radius no control is tall enough to reach: every
 // rounded shape clamps its radius to half its shorter side, so this makes a
 // pill (or a circle, on a square) of whatever it is given to.
@@ -145,8 +156,12 @@ type Theme struct {
 	Success             Color
 	Danger              Color
 	DangerForeground    Color
-	Chart               [5]Color
-	Metrics             Metrics
+	// Warning is the color of something that needs attention but has not failed:
+	// the warning status of an alert, a tag or a field. A hand-built theme that
+	// leaves it zero paints a warning in Danger instead (see WarningColor).
+	Warning Color
+	Chart   [5]Color
+	Metrics Metrics
 	// Transition is the default state-change motion for controls. A zero
 	// value disables animation for hand-built themes.
 	Transition Motion
@@ -156,6 +171,15 @@ type Theme struct {
 	// tooltip appears. Zero shows it with the pointer, which is Viva's pinned
 	// behaviour; a desktop feel is closer to half a second.
 	TooltipDelay time.Duration
+}
+
+// WarningColor is Warning, or Danger for a theme that does not set one, so a
+// hand-built theme never paints a warning in a transparent color.
+func (theme Theme) WarningColor() Color {
+	if theme.Warning == (Color{}) {
+		return theme.Danger
+	}
+	return theme.Warning
 }
 
 // WithRadius is the theme with another corner radius for its controls
@@ -249,7 +273,7 @@ func (theme Theme) WithOpacity(opacity float32) Theme {
 		&theme.Popover, &theme.PopoverForeground, &theme.Muted, &theme.MutedForeground, &theme.Border,
 		&theme.Hover, &theme.Input, &theme.Primary, &theme.PrimaryForeground, &theme.Selection,
 		&theme.SelectionForeground, &theme.Secondary, &theme.SecondaryForeground, &theme.Accent,
-		&theme.AccentForeground, &theme.Ring, &theme.Success, &theme.Danger, &theme.DangerForeground,
+		&theme.AccentForeground, &theme.Ring, &theme.Success, &theme.Danger, &theme.DangerForeground, &theme.Warning,
 	} {
 		color.Alpha *= opacity
 	}
@@ -288,6 +312,7 @@ func DarkTheme() Theme {
 		Success:             RGB(34, 197, 94),
 		Danger:              RGB(255, 100, 103),
 		DangerForeground:    RGB(255, 255, 255),
+		Warning:             RGB(245, 158, 11),
 		Chart: [5]Color{
 			RGB(142, 197, 255), RGB(43, 127, 255), RGB(21, 93, 252),
 			RGB(20, 71, 230), RGB(25, 60, 184),
@@ -324,6 +349,7 @@ func LightTheme() Theme {
 		Success:             RGB(22, 163, 74),
 		Danger:              RGB(231, 0, 11),
 		DangerForeground:    RGB(255, 255, 255),
+		Warning:             RGB(217, 119, 6),
 		Chart: [5]Color{
 			RGB(142, 197, 255), RGB(43, 127, 255), RGB(21, 93, 252),
 			RGB(20, 71, 230), RGB(25, 60, 184),

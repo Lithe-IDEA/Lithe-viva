@@ -34,11 +34,13 @@ func nativeCapabilities() Capabilities {
 		CapabilityWindowMinimize |
 		CapabilityReduceMotion |
 		CapabilityPreventSleep |
-		CapabilitySystemProxy
+		CapabilitySystemProxy |
+		capabilityFileDrag
 	if runtime.GOOS == "darwin" {
 		capabilities |= CapabilityNativeAppearance
 	} else {
 		capabilities |= CapabilityWindowMaximize
 	}
+	capabilities |= capabilityTransparentWindow
 	return Capabilities(capabilities)
 }
