@@ -38,6 +38,7 @@ type presenceOpen struct {
 	runs                                 int
 	shadows                              int
 	hits                                 int
+	hoverHints                           int
 	// order is the canvas's last paint order when the group opened. The
 	// snapshot stores its primitives relative to it.
 	order uint32
@@ -150,7 +151,7 @@ func (canvas *Canvas) BeginPresence(id ID, slot uint8, presence Presence, pivot 
 		entry:      -1,
 		rectangles: len(canvas.rectangles), triangles: len(canvas.triangles), images: len(canvas.images),
 		texts: len(canvas.texts), runs: len(canvas.runs), shadows: len(canvas.shadows),
-		hits: len(canvas.hits), order: canvas.order,
+		hits: len(canvas.hits), hoverHints: len(canvas.hoverHints), order: canvas.order,
 	}
 	if state.active && !state.reduce && !id.IsZero() && presence.Motion.Duration > 0 && presence.moves() {
 		now := state.frameTime()
@@ -350,7 +351,7 @@ func (snapshot *presenceSnapshot) replay(canvas *Canvas, presence Presence, pivo
 	open := presenceOpen{
 		rectangles: len(canvas.rectangles), triangles: len(canvas.triangles), images: len(canvas.images),
 		texts: len(canvas.texts), runs: len(canvas.runs), shadows: len(canvas.shadows),
-		order: canvas.order,
+		hoverHints: len(canvas.hoverHints), order: canvas.order,
 	}
 	base := canvas.order
 	order := base
@@ -543,6 +544,9 @@ func reverseTriangles(triangles []Triangle) {
 // is not worth one per frame, so a label moves with the overlay but keeps its size.
 func (presence Presence) apply(canvas *Canvas, open presenceOpen, pivot Point, progress float32, leaving bool) {
 	transform := presence.transform(pivot, progress, leaving)
+	for index := open.hoverHints; index < len(canvas.hoverHints); index++ {
+		canvas.hoverHints[index].Bounds = transform.rect(canvas.hoverHints[index].Bounds)
+	}
 	moving := transform.scale != 1 || transform.offset != (Point{})
 	fade := presence.Fade
 	if fade && progress < 1 {
