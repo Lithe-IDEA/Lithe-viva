@@ -51,6 +51,13 @@ const (
 	// picture on the clipboard, completing before the call returns on a desktop
 	// and on the event loop in a browser.
 	CapabilityClipboardImageWriteAsync
+	// CapabilityFileDrag means files can be taken out of a window, by path
+	// (StartFileDrag) or by produced content (StartFilePromiseDrag). A platform
+	// without it can still copy files to the clipboard.
+	CapabilityFileDrag
+	// CapabilityTransparentWindow means Config.Transparent can composite a
+	// window over the desktop; without it the window is opaque.
+	CapabilityTransparentWindow
 )
 
 // Capabilities is a set of platform integrations.

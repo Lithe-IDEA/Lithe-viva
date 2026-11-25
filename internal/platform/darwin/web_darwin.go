@@ -116,11 +116,11 @@ func (w *webState) open(config platform.WebViewConfig) (platform.WebView, error)
 	if view == nil {
 		return nil, platform.ErrWebViewUnsupported
 	}
-	var url, html, base, scheme *C.char
+	var url, html, base, scheme, userAgentSuffix *C.char
 	for _, field := range []struct {
 		text string
 		out  **C.char
-	}{{config.URL, &url}, {config.HTML, &html}, {config.BaseURL, &base}} {
+	}{{config.URL, &url}, {config.HTML, &html}, {config.BaseURL, &base}, {config.UserAgentSuffix, &userAgentSuffix}} {
 		*field.out = C.CString(field.text)
 		defer C.free(unsafe.Pointer(*field.out))
 	}
@@ -149,7 +149,7 @@ func (w *webState) open(config platform.WebViewConfig) (platform.WebView, error)
 		defer C.free(unsafe.Pointer(partition))
 	}
 	var failure *C.char
-	native := C.viva_web_open(view, C.uint32_t(config.ID), C.uintptr_t(w.run.callbackHandle), url, html, base, script, mainFrameOnly, scheme, ephemeral, direct, partition, &failure)
+	native := C.viva_web_open(view, C.uint32_t(config.ID), C.uintptr_t(w.run.callbackHandle), url, html, base, script, mainFrameOnly, scheme, ephemeral, direct, userAgentSuffix, partition, &failure)
 	if native == nil {
 		message := "the page could not be created"
 		if failure != nil {
@@ -254,6 +254,20 @@ func (page *darwinWeb) Focus() {
 		C.viva_web_focus(page.native)
 	}
 }
+
+// ShowDevTools opens Web Inspector for the page. A WebKit without the inspector SPI still leaves the
+// page inspectable, and says it could not open the inspector itself.
+func (page *darwinWeb) ShowDevTools() error {
+	if !page.usable() {
+		return fmt.Errorf("darwin: the web view with id %d is closed", page.id)
+	}
+	if C.viva_web_show_dev_tools(page.native) == 0 {
+		return fmt.Errorf("%w: this WebKit cannot open Web Inspector from the application; the page is inspectable from its context menu or Safari's Develop menu", platform.ErrWebViewUnsupported)
+	}
+	return nil
+}
+
+var _ platform.WebDevTools = (*darwinWeb)(nil)
 
 func (page *darwinWeb) Close() {
 	if !page.usable() {

@@ -214,7 +214,7 @@ type nativeWindow struct {
 // reportFrame tells the application where its content area is now, in logical
 // pixels of the window's display. It reports only changes.
 func (state *windowState) reportFrame() {
-	if !state.ready || state.config.OnFrameChange == nil || state.window == 0 || state.minimized || state.zoomed() || state.fullscreen.Load() || state.fullscreenChanging {
+	if !state.ready || state.config.OnFrameChange == nil || state.window == 0 || state.iconic() || state.zoomed() || state.fullscreen.Load() || state.fullscreenChanging {
 		return
 	}
 	var client rect
@@ -425,6 +425,10 @@ func (application *windowsApplication) OpenWindow(config platform.Config) (platf
 		return nil, err
 	}
 	state.installFrame()
+	state.applyTransparent()
+	if config.Transparent && config.OnTransparentChange != nil {
+		config.OnTransparentChange(state.renderer.composition)
+	}
 	if config.SetFrameInterval != nil {
 		// Present(1) in WM_PAINT blocks until the display takes the frame, so
 		// the display paces the window; the runtime needs no interval of its own.
@@ -956,6 +960,9 @@ func windowProc(window, kind, first, second uintptr) (result uintptr) {
 		} else if handled {
 			state.handleTextEvent(textEvent)
 		}
+		if kind == wmRightUp && state.config.TakeTextMenu != nil {
+			state.showTextMenu(window, screen)
+		}
 		if (kind == wmLeftUp || kind == wmRightUp || kind == wmMiddleUp || kind == wmXButtonUp) && first&mkAnyButton == 0 {
 			// The capture is held until the last button is up, so a drag that
 			// started with one button keeps going when another is released.
@@ -1376,9 +1383,7 @@ func (state *windowState) destroyed(window uintptr) {
 	}
 	defer func() {
 		release()
-		if state.application.windows == 0 {
-			active.CompareAndSwap(state, nil)
-		}
+		active.CompareAndSwap(state, nil)
 	}()
 	state.stopCaretTimer()
 	state.closeBackdropPower()

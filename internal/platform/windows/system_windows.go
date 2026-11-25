@@ -58,6 +58,8 @@ type OpenFileOptions struct {
 
 type OpenDirectoryOptions struct {
 	Title string
+	// InitialDirectory is the starting folder. Empty uses the platform default.
+	InitialDirectory string
 }
 
 type SaveFileOptions struct {
@@ -205,6 +207,17 @@ func HasClipboardImage() bool {
 	return false
 }
 
+// activeOwnerWindow returns the HWND of the currently active window, or 0 if none
+// or if the HWND is no longer valid.
+func activeOwnerWindow() uintptr {
+	if state := active.Load(); state != nil && state.window != 0 {
+		if valid, _, _ := isWindow.Call(state.window); valid != 0 {
+			return state.window
+		}
+	}
+	return 0
+}
+
 // ClipboardImagePNG returns the clipboard's image as PNG bytes: the registered
 // "PNG" format as it is, otherwise CF_DIBV5 or CF_DIB converted.
 func ClipboardImagePNG() ([]byte, error) {
@@ -226,16 +239,20 @@ func ClipboardImagePNG() ([]byte, error) {
 		return nil, windowsCallError("open clipboard", callErr)
 	}
 	defer closeClipboard.Call()
+	var readErr error
 	if format := registeredPNGFormat(); format != 0 {
 		if available, _, _ := clipboardFormatAvailable.Call(format); available != 0 {
 			data, err := clipboardBytes(format, platform.MaxClipboardImageBytes+1<<10)
-			if err != nil {
-				return nil, err
+			if err == nil {
+				data, err = platform.TrimClipboardPNG(data)
 			}
-			if data, err = platform.TrimClipboardPNG(data); err != nil {
-				return nil, err
+			if err == nil {
+				err = platform.CheckClipboardPNG(data)
 			}
-			return data, platform.CheckClipboardPNG(data)
+			if err == nil {
+				return data, nil
+			}
+			readErr = err
 		}
 	}
 	for _, format := range [...]uintptr{clipboardDIBV5, clipboardDIB} {
@@ -243,10 +260,16 @@ func ClipboardImagePNG() ([]byte, error) {
 			continue
 		}
 		dib, err := clipboardBytes(format, platform.MaxClipboardRawBytes)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			var data []byte
+			if data, err = platform.DIBToPNG(dib); err == nil {
+				return data, nil
+			}
 		}
-		return platform.DIBToPNG(dib)
+		readErr = err
+	}
+	if readErr != nil {
+		return nil, readErr
 	}
 	return nil, platform.ErrNoClipboardImage
 }
@@ -369,10 +392,7 @@ func setClipboardText(value string, rectangular bool) error {
 	}
 	copy(unsafe.Slice((*uint16)(pointer(memory)), len(encoded)), encoded)
 	globalUnlock.Call(handle)
-	owner := uintptr(0)
-	if state := active.Load(); state != nil {
-		owner = state.window
-	}
+	owner := activeOwnerWindow()
 	if opened, _, callErr := openClipboard.Call(owner); opened == 0 {
 		return windowsCallError("open clipboard", callErr)
 	}
@@ -412,10 +432,7 @@ func SetClipboardFiles(paths []string) error {
 	}
 	clipboardMu.Lock()
 	defer clipboardMu.Unlock()
-	owner := uintptr(0)
-	if state := active.Load(); state != nil {
-		owner = state.window
-	}
+	owner := activeOwnerWindow()
 	if opened, _, callErr := openClipboard.Call(owner); opened == 0 {
 		return windowsCallError("open clipboard", callErr)
 	}
@@ -537,6 +554,9 @@ func OpenDirectory(options OpenDirectoryOptions) (string, bool, error) {
 		if err := configureFileDialog(dialog, options.Title, nil, flags); err != nil {
 			return err
 		}
+		if err := setFileDialogDirectory(dialog, options.InitialDirectory); err != nil {
+			return err
+		}
 		status := uint32(comCall1(dialog, 3, dialogOwner()))
 		if status == dialogCanceled {
 			canceled = true
@@ -554,6 +574,29 @@ func OpenDirectory(options OpenDirectoryOptions) (string, bool, error) {
 		return err
 	})
 	return path, canceled, err
+}
+
+func setFileDialogDirectory(dialog uintptr, directory string) error {
+	if directory == "" {
+		return nil
+	}
+	name, err := syscall.UTF16PtrFromString(directory)
+	if err != nil {
+		return err
+	}
+	itemInterface := guid{Data1: 0x43826d1e, Data2: 0xe718, Data3: 0x42ee, Data4: [8]byte{0xbc, 0x55, 0xa1, 0xe2, 0x61, 0xc3, 0x7b, 0xfe}}
+	var item uintptr
+	status, _, _ := shell.NewProc("SHCreateItemFromParsingName").Call(
+		uintptr(unsafe.Pointer(name)), 0, uintptr(unsafe.Pointer(&itemInterface)), uintptr(unsafe.Pointer(&item)),
+	)
+	if err := hresult(status); err != nil {
+		return fmt.Errorf("windows: create initial directory shell item: %w", err)
+	}
+	defer release(&item)
+	if err := hresult(comCall1(dialog, 12, item)); err != nil {
+		return fmt.Errorf("windows: set initial directory: %w", err)
+	}
+	return nil
 }
 
 func SaveFile(options SaveFileOptions) (string, bool, error) {

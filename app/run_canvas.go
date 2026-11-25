@@ -16,6 +16,8 @@ import (
 // RunCanvas presents a retained canvas and blocks until the native window
 // closes. When config.Paint is set the canvas is repainted on window resizes
 // and pointer interactions; otherwise the initial canvas stays unchanged.
+// On macOS, call runtime.LockOSThread in an init function in package main and
+// start the native canvas from main to satisfy AppKit's main-thread requirement.
 func RunCanvas(config Config, canvas *gfx.Canvas) error {
 	if runtime.GOOS != "windows" {
 		config.CaptureMenuKeys = nil
@@ -43,6 +45,9 @@ func RunCanvas(config Config, canvas *gfx.Canvas) error {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	if err := checkNativeApplicationThread(); err != nil {
+		return err
+	}
 	canvas.SetReduceMotion(nativeReduceMotion())
 	canvas.SetTextEngine(nativeTextEngine())
 	painter, err := newPainter(canvas, &normalized)
@@ -50,6 +55,8 @@ func RunCanvas(config Config, canvas *gfx.Canvas) error {
 		return err
 	}
 	painter.setClipboardText = func(value string) { _ = nativeSetClipboardText(value) }
+	painter.clipboardReader = nativeClipboardText
+	painter.enableTextMenu(nativeTextMenus())
 	painter.setCursor = nativeSetCursor
 	painter.setCursorImage = nativeSetCursorImage
 	native, frames := nativeWindowConfig(&normalized, painter)
@@ -166,17 +173,20 @@ func nativeWindowConfig(normalized *Config, painter *painter) (platform.Config, 
 		closeHandler = platform.CloseRequestHandler(normalized.OnCloseRequest)
 	}
 	config := platform.Config{
-		Actions:   painter.windowActions(),
-		TextInput: painter.initialTextInput(),
-		Title:     normalized.Title, Class: normalized.Class, Icon: normalized.Icon.platform(), Width: normalized.Width, Height: normalized.Height,
+		Actions:      painter.windowActions(),
+		TextInput:    painter.initialTextInput(),
+		TakeTextMenu: painter.textMenuTaker(),
+		Title:        normalized.Title, Class: normalized.Class, Icon: normalized.Icon.platform(), Width: normalized.Width, Height: normalized.Height,
 		MinWidth: normalized.MinWidth, MinHeight: normalized.MinHeight,
 		Origin: normalized.originPoint(), HasOrigin: normalized.Origin != nil,
-		Maximized:         normalized.Maximized,
-		WindowMode:        platform.WindowMode(normalized.WindowMode),
-		WindowMaterials:   normalized.windowMaterials(),
-		TitlebarHeight:    normalized.TitlebarHeight,
-		TrafficLightScale: normalized.TrafficLightScale,
-		Anchor:            normalized.Anchor.rect, HasAnchor: normalized.Anchor.set,
+		Maximized:           normalized.Maximized,
+		WindowMode:          platform.WindowMode(normalized.WindowMode),
+		WindowMaterials:     normalized.windowMaterials(),
+		Transparent:         normalized.Transparent,
+		OnTransparentChange: normalized.OnTransparentChange,
+		TitlebarHeight:      normalized.TitlebarHeight,
+		TrafficLightScale:   normalized.TrafficLightScale,
+		Anchor:              normalized.Anchor.rect, HasAnchor: normalized.Anchor.set,
 		ClearColor: platform.Color{
 			Red: normalized.ClearColor.Red, Green: normalized.ClearColor.Green,
 			Blue: normalized.ClearColor.Blue, Alpha: normalized.ClearColor.Alpha,
@@ -259,6 +269,8 @@ func prepareNativeWindow(config Config, canvas *gfx.Canvas) (platform.Config, *p
 		return platform.Config{}, nil, nil, err
 	}
 	painter.setClipboardText = func(value string) { _ = nativeSetClipboardText(value) }
+	painter.clipboardReader = nativeClipboardText
+	painter.enableTextMenu(nativeTextMenus())
 	painter.setCursor = nativeSetCursor
 	painter.setCursorImage = nativeSetCursorImage
 	native, timer := nativeWindowConfig(&normalized, painter)

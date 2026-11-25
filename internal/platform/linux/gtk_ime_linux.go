@@ -18,12 +18,13 @@ import (
 // and commits the choice as it does on the other platforms. The input method owns the candidate
 // window; this side says when the field has the keyboard and where its caret is.
 type gtkIME struct {
-	w         *gtkWindow
-	g         *gtkLibrary
-	ctx       uintptr
-	target    gfx.ID
-	owner     text.CompositionIdentity
-	tentative bool
+	w            *gtkWindow
+	g            *gtkLibrary
+	ctx          uintptr
+	clientWindow uintptr
+	target       gfx.ID
+	owner        text.CompositionIdentity
+	tentative    bool
 	// focused is whether the window has the keyboard; active is whether the context was told the
 	// field does.
 	focused bool
@@ -32,6 +33,7 @@ type gtkIME struct {
 	engineComposing bool
 	// session survives an empty native update until GTK supplies an end or result.
 	session, ending bool
+	discarding      bool
 	nativeDepth     int
 	// rootContext is the context of the outermost callContext, the call whose
 	// deferred finishPreedit runs when the native depth returns to zero. A
@@ -75,7 +77,25 @@ func (ime *gtkIME) sameOwner(input *platform.TextInput) bool {
 
 // realized gives the context its window, which exists once the toplevel is realized.
 func (ime *gtkIME) realized() {
-	if window := ime.g.widgetGetWindow(ime.w.toplevel); window != 0 {
+	window := ime.g.widgetGetWindow(ime.w.toplevel)
+	if window != 0 && ime.w.wl != nil {
+		if ime.clientWindow == 0 {
+			const gdkWindowChild, gdkInputOnly = 2, 1
+			attrs := gdkWindowAttr{Width: 1, Height: 1, WindowType: gdkWindowChild, Class: gdkInputOnly}
+			ime.clientWindow = ime.g.gdkWindowNew(window, &attrs, 0)
+			if ime.clientWindow != 0 {
+				ime.g.widgetRegisterWindow(ime.w.area, ime.clientWindow)
+				empty := ime.g.cairoRegionRect(&[4]int32{})
+				ime.g.gdkWindowInputShape(ime.clientWindow, empty, 0, 0)
+				ime.g.cairoRegionDestroy(empty)
+				ime.g.gdkWindowShow(ime.clientWindow)
+			}
+		}
+		if ime.clientWindow != 0 {
+			window = ime.clientWindow
+		}
+	}
+	if window != 0 {
 		ime.callContext(ime.ctx, func(context uintptr) { ime.g.imSetClientWindow(context, window) })
 	}
 }
@@ -95,6 +115,11 @@ func (ime *gtkIME) close() {
 		ime.callContext(context, ime.g.imFocusOut)
 	}
 	ime.callContext(context, func(context uintptr) { ime.g.imSetClientWindow(context, 0) })
+	if window := ime.clientWindow; window != 0 {
+		ime.clientWindow = 0
+		ime.g.widgetUnregisterWindow(ime.w.area, window)
+		ime.g.gdkWindowDestroy(window)
+	}
 	ime.w.app.retireIME(context)
 }
 
@@ -198,6 +223,10 @@ func (ime *gtkIME) sync() {
 		ime.callContext(context, ime.g.imFocusIn)
 	case !want && ime.active:
 		ime.active = false
+		if !ime.focused && ime.composing() {
+			ime.discardOnFocusOut(context)
+			return
+		}
 		if ime.engineComposing || ime.session {
 			ime.engineComposing = false
 			ime.callContext(context, ime.g.imReset)
@@ -224,12 +253,27 @@ func (ime *gtkIME) sync() {
 	ime.updateSurrounding()
 }
 
-// updateCursor tells the input method's window where the caret is, in the toplevel's coordinates.
+func (ime *gtkIME) discardOnFocusOut(context uintptr) {
+	func() {
+		ime.discarding = true
+		defer func() { ime.discarding = false }()
+		ime.callContext(context, ime.g.imReset)
+		if ime.ctx == context && !ime.w.closed && !ime.active {
+			ime.callContext(context, ime.g.imFocusOut)
+		}
+	}()
+	if ime.current(context) && !ime.active {
+		ime.ending = true
+		ime.finishPreedit(context)
+	}
+}
+
+// updateCursor tells the input method where the caret is in its client window.
 func (ime *gtkIME) updateCursor() {
 	w := ime.w
 	x, y, width, height := ime.caretRectangle()
-	var left, top int32
-	w.g.widgetTranslate(w.area, w.toplevel, int32(x*w.ratio), int32(y*w.ratio), &left, &top)
+	left, top := int32(x*w.ratio), int32(y*w.ratio)
+	w.g.widgetTranslate(w.area, w.toplevel, left, top, &left, &top)
 	location := [4]int32{left, top, int32(width * w.ratio), int32(height * w.ratio)}
 	if ime.haveCursor && location == ime.cursor {
 		return
@@ -301,6 +345,9 @@ func (ime *gtkIME) deleteSurrounding(offset, count int) uintptr {
 }
 
 func (ime *gtkIME) commit(value string) {
+	if ime.discarding {
+		return
+	}
 	context, revision := ime.ctx, ime.w.text.stateRevision
 	composing := ime.composing()
 	if key := ime.shortcutKey; key != nil && !composing && value == key.Typed {
@@ -495,6 +542,9 @@ func (ime *gtkIME) clause(attrs uintptr, value string) (text.Range, bool) {
 
 // apply runs one text event through the field and presents the result.
 func (ime *gtkIME) apply(event platform.TextEvent) {
+	if ime.discarding {
+		return
+	}
 	frame, err := ime.w.text.textEvent(event)
 	ime.w.present(frame, err)
 }

@@ -22,8 +22,12 @@ func nativeClipboardFiles() ([]string, error) { return darwinplatform.ClipboardF
 
 func nativeSetClipboardFiles(paths []string) error { return darwinplatform.SetClipboardFiles(paths) }
 
-func nativeStartFileDrag(paths []string, allowed FileDragEffect) (FileDragEffect, error) {
+func nativeStartFileDrag(paths []string, allowed FileDragEffect) error {
 	return darwinplatform.StartFileDrag(paths, allowed)
+}
+
+func nativeStartFilePromiseDrag(files []FilePromise) error {
+	return darwinplatform.StartFilePromiseDrag(files)
 }
 
 func nativeReduceMotion() bool { return darwinplatform.ReduceMotion() }
@@ -64,7 +68,7 @@ func nativeOpenFiles(options OpenFileOptions) ([]string, error) {
 }
 
 func nativeOpenDirectory(options OpenDirectoryOptions) (string, error) {
-	path, canceled, err := darwinplatform.OpenDirectory(darwinplatform.OpenDirectoryOptions{Title: options.Title})
+	path, canceled, err := darwinplatform.OpenDirectory(darwinplatform.OpenDirectoryOptions{Title: options.Title, InitialDirectory: options.InitialDirectory})
 	if canceled {
 		return "", ErrCanceled
 	}

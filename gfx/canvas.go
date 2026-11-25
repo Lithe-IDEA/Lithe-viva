@@ -731,10 +731,15 @@ type Canvas struct {
 	// fillPoints is the outline of a gradient-filled rounded rectangle.
 	fillPoints []Point
 	// path and triangulation scratch survives Reset: reused every paint.
-	strokeSideA     []Point
-	strokeSideB     []Point
-	strokeRing      []Point
-	ringPoints      []Point
+	strokeSideA []Point
+	strokeSideB []Point
+	strokeRing  []Point
+	ringPoints  []Point
+	// poseShapes, posePoints and poseMerge are the scratch of turning a posed
+	// group's rectangles into vector shapes (presence.go).
+	poseShapes      []Triangle
+	posePoints      []Point
+	poseMerge       []Triangle
 	ringEnds        []int32
 	earcut          earcutScratch
 	rings           []ringCacheEntry
@@ -794,9 +799,11 @@ type Canvas struct {
 	afterPaint                  []func()
 	// pointer is the pointer event the event pass is delivering; consumed records
 	// that a control took it; listensForPointer that the last paint asked.
-	pointer           PointerEvent
-	hasPointer        bool
-	consumed          bool
+	pointer    PointerEvent
+	hasPointer bool
+	consumed   bool
+	// nativeTextMenu is whether the window shows the system's text menu.
+	nativeTextMenu    bool
 	listensForPointer bool
 	initialFocus      ID
 	// focusRequest asks the runtime to focus one hit even without a trap, as a
@@ -1111,6 +1118,9 @@ func (canvas *Canvas) Trim() {
 	canvas.strokeSideB = trimCapacity(canvas.strokeSideB)
 	canvas.strokeRing = trimCapacity(canvas.strokeRing)
 	canvas.ringPoints = trimCapacity(canvas.ringPoints)
+	canvas.poseShapes = trimCapacity(canvas.poseShapes)
+	canvas.posePoints = trimCapacity(canvas.posePoints)
+	canvas.poseMerge = trimCapacity(canvas.poseMerge)
 	canvas.ringEnds = trimCapacity(canvas.ringEnds)
 	canvas.parentScratch = trimCapacity(canvas.parentScratch)
 	canvas.consumedScratch = trimCapacity(canvas.consumedScratch)
@@ -2371,6 +2381,14 @@ func (canvas *Canvas) PointerIn(list Scope) (int, PointerEvent, bool) {
 	}
 	return index, canvas.pointer, true
 }
+
+// SetNativeTextMenu records that the window shows the system's own menu for a
+// secondary press on a text field, so a page does not draw one too. The runtime
+// sets it from the window; it is not reset between paints.
+func (canvas *Canvas) SetNativeTextMenu(native bool) { canvas.nativeTextMenu = native }
+
+// NativeTextMenu reports whether the window shows the system's own text menu.
+func (canvas *Canvas) NativeTextMenu() bool { return canvas.nativeTextMenu }
 
 // Consume says the control took the pointer event being delivered: the runtime
 // does not also treat it as a click, and repaints. It does nothing outside the

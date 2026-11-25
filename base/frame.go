@@ -123,8 +123,12 @@ type Node struct {
 	Label                string
 	Variant              style.Variant
 	ButtonSize           style.Size
-	RowSpan              uint8 // the rows a Grid child covers; zero is one
-	OutOfFlow            uint8 // absolute positioning: see absolute.go
+	Status               style.Status // the outcome a Progress reports through its fill
+	Circle               bool         // a Progress drawn as a ring
+	Segments             uint8        // a Progress bar drawn as this many separate segments; zero is one bar
+	Loading              bool         // a Button that is busy: a spinner in its icon slot, and presses are not delivered
+	RowSpan              uint8        // the rows a Grid child covers; zero is one
+	OutOfFlow            uint8        // absolute positioning: see absolute.go
 
 	MaxLines             int32     // a wrapped Text breaks into at most this many lines
 	LineFirst, LineCount int32     // its lines, in frame.lines
@@ -191,7 +195,16 @@ type Extra struct {
 	ring          Color   // Ring: a line around the outside of the element
 	ringWidth     float32 // its width; zero is none
 	borderDashed  bool
-	fade          float32          // 1 less the opacity, so that the zero value is opaque
+	fade          float32    // 1 less the opacity, so that the zero value is opaque
+	glide         gfx.Motion // Glide: how the element slides to a place the layout moves it to
+	glided        bool
+	glideScroll   gfx.Point
+	presence      gfx.Presence // Presence: how the element enters and leaves
+	presenced     bool
+	pose          gfx.Pose // Pose: where the element sits relative to its place
+	poseMotion    gfx.Motion
+	posed         bool
+	glideID       gfx.ID           // the identity of a glided element that has no hit of its own, such as a list row
 	gradient      int32            // 1 + the index of the element's gradient in frame.gradients, or 0 for none
 	States        int32            // 1 + the index of the element's Hover, Pressed and Focus looks in frame.states, or 0 for none
 	scrollState   *ScrollState     // the state a ScrollArea reports its extent to
