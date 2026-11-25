@@ -302,8 +302,10 @@ type Page struct {
 	pointer     gfx.Point             // where the pointer was at the last pointer event
 	pointerIn   bool                  // a pointer event put it there, and no exit has taken it away
 	hoverArea   gfx.ID                // the scroll area or self-scrolling table the pointer is on
-	selects     []*SelectState        // the Selects of the last paint, which Wheel scrolls
-	labels      []string              // scratch for Choice's labels
+	hoverText   gfx.HoverHint         // changes wake a page even when text has no pointer target
+	pointerDown bool
+	selects     []*SelectState // the Selects of the last paint, which Wheel scrolls
+	labels      []string       // scratch for Choice's labels
 	memos       map[gfx.ID]*memoEntry
 	memoBoxes   []memoBox
 	memoChecks  []memoCheckOf
@@ -571,6 +573,12 @@ func (p *Page) onKey(event gfx.KeyEvent) gfx.EventResult {
 
 func (p *Page) onPointer(event gfx.PointerEvent) gfx.EventResult {
 	switch event.Kind {
+	case gfx.PointerDown:
+		p.pointerDown = true
+	case gfx.PointerUp, gfx.PointerExit:
+		p.pointerDown = false
+	}
+	switch event.Kind {
 	case gfx.PointerMove, gfx.PointerDown, gfx.PointerUp:
 		p.pointer, p.pointerIn = gfx.Point{X: event.X, Y: event.Y}, true
 	case gfx.PointerExit:
@@ -590,6 +598,9 @@ func (p *Page) onPointer(event gfx.PointerEvent) gfx.EventResult {
 		p.hoverArea = p.hoverPlaceAt(p.pointer.X, p.pointer.Y)
 	}
 	entered := wasArea != p.hoverArea
+	text := p.HoveredText()
+	textChanged := !text.SameText(p.hoverText)
+	p.hoverText = text
 	var result gfx.EventResult
 	if done, ok := p.dropPointer(event); ok {
 		result = done
@@ -602,7 +613,8 @@ func (p *Page) onPointer(event gfx.PointerEvent) gfx.EventResult {
 	} else if p.basePointer != nil {
 		result = p.basePointer(event)
 	}
-	result.Repaint = result.Repaint || entered
+	result.Repaint = result.Repaint || entered || textChanged ||
+		text.Text != "" && (event.Kind == gfx.PointerDown || event.Kind == gfx.PointerUp)
 	return result
 }
 
@@ -847,6 +859,7 @@ func (p *Page) paintOnce(Surface *gfx.Canvas, bounds Rect, View func(C)) {
 	p.Nodes = append(p.Nodes[:0], protoNode{scope: p.root, named: true, parentNode: -1}) // node 0, the root column
 	View(&p.ctx)
 	f.End()
+	p.hoverText = p.HoveredText()
 	if p.settleContainers() {
 		p.retry = true
 	}
