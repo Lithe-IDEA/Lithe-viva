@@ -226,6 +226,17 @@ type PageConfig struct {
 	// lists, trees and tables share one look without repeating Bars on each. Zero fields
 	// keep Viva's defaults; a ScrollbarSize on the page or on one bar still wins.
 	BarStyle ScrollBarStyle
+	// EllipsisTooltips shows the complete value of text shortened with an
+	// ellipsis in a tooltip while the pointer rests on it: a Text cut by Ellipsis
+	// or MaxLines, and the labels components shorten themselves, such as Table
+	// cells, Select values and menu items. It is off by default, which paints
+	// such text as before; Box.EllipsisTooltip turns it on or off for part of the
+	// page. The tooltip opens below the text, or beside the side
+	// Box.EllipsisTooltipOn gives. Over the text, this tooltip takes the place of
+	// the Tooltip of the element the text is in. Only the pointer shows it, not
+	// keyboard focus; it is not in the accessibility tree, where a control keeps
+	// its complete name and value whatever its drawing shortens.
+	EllipsisTooltips bool
 	// Invalidator wakes the window the page is drawn in when an Effect of the page
 	// finishes. Configure uses it instead of the app.Config's; a page the application
 	// draws into a window of its own (Draw, not Paint) needs it, since only Config
@@ -312,7 +323,7 @@ type Page struct {
 	pointer     gfx.Point             // where the pointer was at the last pointer event
 	pointerIn   bool                  // a pointer event put it there, and no exit has taken it away
 	hoverArea   gfx.ID                // the scroll area or self-scrolling table the pointer is on
-	hoverText   gfx.HoverHint         // changes wake a page even when text has no pointer target
+	hoverText   gfx.HoverHint         // the hint under the pointer at the last paint or pointer event; changes wake a page even when text has no pointer target
 	pointerDown bool
 	selects     []*SelectState // the Selects of the last paint, which Wheel scrolls
 	labels      []string       // scratch for Choice's labels
@@ -609,7 +620,10 @@ func (p *Page) onPointer(event gfx.PointerEvent) gfx.EventResult {
 		p.hoverArea = p.hoverPlaceAt(p.pointer.X, p.pointer.Y)
 	}
 	entered := wasArea != p.hoverArea
-	text := p.HoveredText()
+	var text gfx.HoverHint
+	if p.View.Frame != nil {
+		text = p.hoverTextOn(p.View.Frame.Surface)
+	}
 	textChanged := !text.SameText(p.hoverText)
 	p.hoverText = text
 	var result gfx.EventResult
@@ -877,7 +891,6 @@ func (p *Page) paintOnce(Surface *gfx.Canvas, bounds Rect, View func(C)) {
 	View(&p.ctx)
 	p.declareEditMenus(&p.ctx)
 	f.End()
-	p.hoverText = p.HoveredText()
 	if p.settleContainers() {
 		p.retry = true
 	}
