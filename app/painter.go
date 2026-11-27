@@ -125,8 +125,16 @@ type painter struct {
 	// the hit test and read back into the next paint.
 	onSurface bool
 	cursor    Cursor
-	scrollX   float32
-	scrollY   float32
+	// pointerAt is the last pointer position in page coordinates.
+	pointerAt gfx.Point
+	// pointerPresent distinguishes a pointer in the window from the initial
+	// state and the coordinates carried by an exit.
+	pointerPresent bool
+	// pointerNeedsHit marks a viewport resize, which can move the window edge
+	// across the pointer even if the page declares the same regions.
+	pointerNeedsHit bool
+	scrollX         float32
+	scrollY         float32
 	// scheduleFrame asks the runtime for one more frame, after at least the
 	// delay, while a transition is in flight or the application asked for one.
 	scheduleFrame func(delay time.Duration)
@@ -224,6 +232,7 @@ func (painter *painter) resize(size platform.Size) (platform.Frame, error) {
 	next := gfx.Size{Width: size.Width, Height: size.Height}
 	changed := next != painter.size
 	painter.size, painter.scale = next, size.Scale
+	painter.pointerNeedsHit = painter.pointerNeedsHit || changed
 	if changed && painter.onResize != nil {
 		painter.onResize(next)
 	}
@@ -271,6 +280,7 @@ func (painter *painter) pointerInput(event platform.PointerEvent) (platform.Fram
 // pointerInputOf is pointerInput, and says in handled whether the application
 // took the press.
 func (painter *painter) pointerInputOf(event platform.PointerEvent, handled *bool) (platform.Frame, error) {
+	painter.pointerAt = gfx.Point{X: event.X, Y: event.Y}
 	if event.Kind == platform.PointerDown {
 		painter.tap.Cancel()
 		painter.pointerOutside = false
@@ -283,8 +293,8 @@ func (painter *painter) pointerInputOf(event platform.PointerEvent, handled *boo
 		painter.pointer.Exit()
 		event.Kind = platform.PointerExit
 	}
-	if event.Kind == platform.PointerMove && painter.pointerOutside &&
-		event.X >= 0 && event.Y >= 0 && event.X < painter.size.Width && event.Y < painter.size.Height {
+	painter.pointerPresent = event.Kind != platform.PointerExit
+	if event.Kind == platform.PointerMove && painter.pointerOutside && painter.pointerAtInside() {
 		painter.pointerOutside = false
 	}
 	if event.Kind == platform.PointerExit && !painter.pointer.PressTarget().IsZero() {
@@ -293,16 +303,14 @@ func (painter *painter) pointerInputOf(event platform.PointerEvent, handled *boo
 		// exactly where the user needs it: past the edge of the terminal, the
 		// list or the window. The exit is delivered when the button is released.
 		painter.pointerOutside = true
-		painter.onSurface = false
-		if painter.pointer.Hovered().IsZero() {
+		painter.trackEdge(false)
+		if !painter.updateHover(false, false) {
 			return platform.Frame{}, nil
 		}
-		painter.pointer.SetHovered(gfx.ID{})
-		painter.pointer.SetHoveredRole(gfx.Role(0))
 		return painter.repaintAfterInput()
 	}
 	beforeHovered, beforePressed := painter.pointer.Hovered(), painter.pointer.Pressed()
-	beforeSurface := painter.onSurface
+	beforeRole, beforeSurface := painter.pointer.HoveredRole(), painter.onSurface
 	beforeFocus, beforeKeyboard := painter.focus.Focused(), painter.focus.KeyboardFocus()
 	passes := event.Kind == platform.PointerDown &&
 		(event.Button == gfx.PointerButtonSecondary && painter.focus.Router().PassesSecondary(event.X, event.Y) ||
@@ -350,7 +358,7 @@ func (painter *painter) pointerInputOf(event platform.PointerEvent, handled *boo
 	}
 
 	if painter.pointer.Hovered() == beforeHovered && painter.pointer.Pressed() == beforePressed &&
-		painter.onSurface == beforeSurface &&
+		painter.pointer.HoveredRole() == beforeRole && painter.onSurface == beforeSurface &&
 		painter.focus.Focused() == beforeFocus && painter.focus.KeyboardFocus() == beforeKeyboard &&
 		!focusChanged && !result.Repaint {
 		if edgeChanged {
@@ -366,18 +374,10 @@ func (painter *painter) pointerInputOf(event platform.PointerEvent, handled *boo
 // state, the application and the controls' event pass. It returns what the
 // application answered and whether focus and the pointer's edge state changed.
 func (painter *painter) pointerStep(event platform.PointerEvent) (result gfx.EventResult, focusChanged, edgeChanged bool) {
-	painter.pointer.SetHovered(gfx.ID{})
-	painter.pointer.SetHoveredRole(gfx.Role(0))
-	painter.onSurface = false
-	if event.Kind != platform.PointerExit {
-		secondaryPress := event.Kind == platform.PointerDown && event.Button == gfx.PointerButtonSecondary
-		if target, ok, onSurface := painter.focus.Router().PointerAt(event.X, event.Y, secondaryPress); ok || onSurface {
-			painter.pointer.SetHovered(target.Target)
-			painter.pointer.SetHoveredRole(target.Role)
-			painter.onSurface = onSurface
-		}
-	}
-	edgeChanged = painter.trackEdge(event)
+	secondaryPress := event.Kind == platform.PointerDown && event.Button == gfx.PointerButtonSecondary
+	inside := painter.pointerPresent && !painter.pointerOutside && painter.pointerAtInside()
+	painter.updateHover(inside, secondaryPress)
+	edgeChanged = painter.trackEdge(inside)
 
 	if event.Kind == platform.PointerDown {
 		painter.pointer.Down(event.Button)
@@ -410,6 +410,26 @@ func (painter *painter) pointerStep(event platform.PointerEvent) (result gfx.Eve
 		result.Repaint = true
 	}
 	return result, focusChanged, edgeChanged
+}
+
+func (painter *painter) pointerAtInside() bool {
+	return painter.pointerAt.X >= 0 && painter.pointerAt.Y >= 0 &&
+		painter.pointerAt.X < painter.size.Width && painter.pointerAt.Y < painter.size.Height
+}
+
+// updateHover resolves the pointer against the current routing regions. Press
+// capture and application pointer events are independent of this lookup.
+func (painter *painter) updateHover(inside, secondaryPress bool) bool {
+	var hit input.Region
+	var onSurface bool
+	if inside {
+		hit, _, onSurface = painter.focus.Router().PointerAt(painter.pointerAt.X, painter.pointerAt.Y, secondaryPress)
+	}
+	changed := painter.pointer.Hovered() != hit.Target || painter.pointer.HoveredRole() != hit.Role || painter.onSurface != onSurface
+	painter.pointer.SetHovered(hit.Target)
+	painter.pointer.SetHoveredRole(hit.Role)
+	painter.onSurface = onSurface
+	return changed
 }
 
 // placeCaret puts the caret of the focused text field where a press, or the drag
@@ -1018,7 +1038,7 @@ func (painter *painter) repaint() (platform.Frame, error) {
 		painter.noteFrameStart()
 	}
 	painter.paintCanvas()
-	painter.settleFocus()
+	painter.settleInteraction()
 	frame, err := painter.publish()
 	if err != nil {
 		return platform.Frame{}, err
@@ -1062,27 +1082,39 @@ const (
 	focusReused
 )
 
-// maxFocusPasses bounds the paints settleFocus adds to one frame: a page whose
-// every paint moves the focus somewhere new shows the last move.
-const maxFocusPasses = 2
+// maxInteractionRepaints bounds the work for a page where paint keeps moving
+// the focused or hovered target.
+const maxInteractionRepaints = 2
 
-// settleFocus applies the focus changes the paint itself made, by an Autofocus
-// hit that appeared, a focus request or release, a returning scope that closed,
-// a modal that opened or closed, or a request carried from the event, and paints
-// again when the focus moved, so the frame shows the focus it routes keys to.
-func (painter *painter) settleFocus() {
+// settleInteraction syncs focus and the pointer with the regions just painted.
+// A scroll or layout change can move hits under a stationary pointer. Paint
+// again if these regions change the state that the frame should show.
+func (painter *painter) settleInteraction() {
 	if painter.paint == nil {
 		return
 	}
-	for range maxFocusPasses {
-		if !painter.regionsNeedSync() {
-			painter.focusSettled = focusReused
-			return
-		}
+	needsPointerHit := painter.pointerNeedsHit
+	painter.pointerNeedsHit = false
+	synced := false
+	for pass := 0; ; pass++ {
 		before, beforeVisible := painter.focus.Focused(), painter.focus.KeyboardFocus()
-		painter.focus.Sync(painter.canvas)
-		painter.focusSettled = focusSynced
-		if painter.focus.Focused() == before && painter.focus.KeyboardFocus() == beforeVisible {
+		// After an intermediate paint, the router may differ from the last
+		// published regions even if the new paint restored those regions.
+		if synced || painter.regionsNeedSync() {
+			painter.focus.Sync(painter.canvas)
+			painter.focusSettled = focusSynced
+			synced = true
+		} else {
+			painter.focusSettled = focusReused
+		}
+		hoverChanged := false
+		if painter.pointerPresent && (synced || needsPointerHit) {
+			inside := !painter.pointerOutside && painter.pointerAtInside()
+			hoverChanged = painter.updateHover(inside, false)
+			painter.trackEdge(inside)
+		}
+		if pass == maxInteractionRepaints ||
+			(!hoverChanged && painter.focus.Focused() == before && painter.focus.KeyboardFocus() == beforeVisible) {
 			return
 		}
 		painter.paintCanvas()
