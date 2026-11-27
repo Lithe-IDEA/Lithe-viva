@@ -31,6 +31,7 @@ func (canvas *Canvas) BeginEmbedded(parent *Canvas, mount Scope) {
 	canvas.iconCache = parent.icons()
 	tree := canvas.tree
 	canvas.hovered, _ = tree.Local(mount, parent.hovered)
+	canvas.hoverFromLayout = parent.hoverFromLayout
 	canvas.pressed, _ = tree.Local(mount, parent.pressed)
 	canvas.focused, _ = tree.Local(mount, parent.focused)
 	canvas.focusVisible = parent.focusVisible && !canvas.focused.IsZero()
@@ -85,6 +86,11 @@ func (canvas *Canvas) Embed(child *Canvas, origin Point, mount Scope) {
 		for index := range triangle.Points {
 			triangle.Points[index].X += origin.X
 			triangle.Points[index].Y += origin.Y
+		}
+		if triangle.Coverage != nil {
+			coverage := *triangle.Coverage
+			coverage.Points = translatePoints(coverage.Points, origin)
+			triangle.Coverage = &coverage
 		}
 		triangle.Layer += layer
 		triangle.Order += orderBase

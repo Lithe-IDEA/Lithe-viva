@@ -124,6 +124,13 @@ var shadowLayers = [...][2]struct {
 	ShadowLG: {{ShadowStyle{OffsetY: 10, Blur: 15, Spread: -3}, 0.10}, {ShadowStyle{OffsetY: 4, Blur: 6, Spread: -4}, 0.10}},
 }
 
+// StrokeCoverage describes the uncut triangle of a stroke quad. All pieces
+// cut from the same triangle use these coordinates for edge feathering.
+type StrokeCoverage struct {
+	Points   [3]Point
+	EdgeMask uint8
+}
+
 // Triangle is one solid vector-mesh primitive. Paths are tessellated into
 // triangles so native backends need no SVG parser or general geometry engine.
 type Triangle struct {
@@ -141,7 +148,14 @@ type Triangle struct {
 	// boundary. Bit 0 is Points[0]→Points[1], bit 1 is Points[1]→Points[2],
 	// and bit 2 is Points[2]→Points[0]. Renderers feather only these edges;
 	// shared tessellation edges stay fully covered.
+	// Bit 3 marks one half of a stroke quad: the long edge is 0→1 when bit 0
+	// is set, otherwise 2→0. Its opposite boundary is parallel through the
+	// remaining point. Both boundaries constrain coverage, whichever half the
+	// quad's internal diagonal assigns a pixel to.
 	EdgeMask uint8
+	// Coverage, when present, gives a flat clipped stroke its original
+	// silhouette. Points and EdgeMask still control which pixels it owns.
+	Coverage *StrokeCoverage
 	ClipOf   Rect
 	HasClip  bool
 	// Order is where the triangle was painted among every primitive of the
@@ -818,13 +832,14 @@ type Canvas struct {
 	touched bool
 	// prevHovered is the hit the pointer was on at the end of the previous
 	// paint, which is what HoverCrossed compares against.
-	prevHovered  ID
-	pressed      ID
-	focused      ID
-	scrollX      float32
-	scrollY      float32
-	trappedScope ID
-	escapeTarget ID
+	prevHovered                          ID
+	hoverFromLayout, prevHoverFromLayout bool
+	pressed                              ID
+	focused                              ID
+	scrollX                              float32
+	scrollY                              float32
+	trappedScope                         ID
+	escapeTarget                         ID
 	// The focus-scope depth each overlay claim was made at. A claim from a
 	// deeper scope (a popup inside a dialog) wins over an outer one however
 	// late the outer overlay finishes painting; equal depths let the later
@@ -1103,6 +1118,7 @@ func (canvas *Canvas) Reset() {
 	canvas.focusReturns = canvas.focusReturns[:0]
 	canvas.trapDepth, canvas.escapeDepth, canvas.initialDepth = -1, -1, -1
 	canvas.prevHovered = canvas.hovered
+	canvas.prevHoverFromLayout = canvas.hoverFromLayout
 	canvas.listensForClicks = false
 	canvas.listensForPointer = false
 }
@@ -2183,6 +2199,7 @@ func (canvas *Canvas) Clips() []Clip {
 // runtime-facing; application paint code should only read it.
 func (canvas *Canvas) SetInteraction(hovered, pressed, focused ID, focusVisible bool) {
 	canvas.hovered = hovered
+	canvas.hoverFromLayout = false
 	canvas.hoveredRole = 0
 	canvas.onSurface = false
 	canvas.pressed = pressed
@@ -2193,6 +2210,19 @@ func (canvas *Canvas) SetInteraction(hovered, pressed, focused ID, focusVisible 
 // Hovered returns the hit ID currently under the pointer, or the zero ID.
 func (canvas *Canvas) Hovered() ID {
 	return canvas.hovered
+}
+
+// HoverFromLayout reports that the current hover was found after layout moved
+// hits under a stationary pointer. It can update the highlight without
+// moving a menu's keyboard cursor.
+func (canvas *Canvas) HoverFromLayout() bool {
+	return canvas.hoverFromLayout
+}
+
+// SetHoverFromLayout records the source of the hover for this paint. It is
+// runtime-facing; application paint code should only read it.
+func (canvas *Canvas) SetHoverFromLayout(fromLayout bool) {
+	canvas.hoverFromLayout = fromLayout
 }
 
 // HoveredRole returns the role of the hovered hit, or the zero role when the
@@ -2234,12 +2264,13 @@ func (canvas *Canvas) SetTitlebarInsets(leading, trailing float32) {
 	canvas.titlebarLeading, canvas.titlebarTrailing = leading, trailing
 }
 
-// HoverCrossed reports whether the pointer reached a different hit since the
-// previous paint. Lists use it to move their current row onto the row the
-// pointer entered, without letting a pointer that rests in place take the row
-// back from the keyboard.
+// HoverCrossed reports whether pointer input reached a different hit since the
+// previous paint or moved within a hit that layout moved under the pointer.
+// Lists use it to move their current row without taking it back from the
+// keyboard while the pointer rests in place.
 func (canvas *Canvas) HoverCrossed() bool {
-	return canvas.hovered != canvas.prevHovered
+	return !canvas.hoverFromLayout && (canvas.hovered != canvas.prevHovered ||
+		canvas.prevHoverFromLayout && !canvas.hovered.IsZero())
 }
 
 // Pressed returns the hit ID currently held down, or the zero ID.

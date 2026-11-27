@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 30
+	ProtocolVersion = 31
 	MaxFrameBytes   = 32 << 20
 	MaxStateBytes   = 8 << 20
 	maxItems        = 200_000
@@ -403,6 +403,7 @@ func encodeScrollEvent(value gfx.ScrollEvent) []byte {
 	result.f32(value.Y)
 	result.f32(value.DeltaX)
 	result.f32(value.DeltaY)
+	result.f32(value.Pages)
 	result.f32(value.Viewport.Width)
 	result.f32(value.Viewport.Height)
 	result.id(value.Target)
@@ -414,7 +415,7 @@ func decodeScrollEvent(data []byte) (gfx.ScrollEvent, error) {
 	value := decoder{data: data}
 	result := gfx.ScrollEvent{
 		Modifiers: gfx.Modifiers(value.u8()), X: value.f32(), Y: value.f32(),
-		DeltaX: value.f32(), DeltaY: value.f32(), Viewport: gfx.Size{Width: value.f32(), Height: value.f32()}, Target: value.id(), Precise: value.bool(),
+		DeltaX: value.f32(), DeltaY: value.f32(), Pages: value.f32(), Viewport: gfx.Size{Width: value.f32(), Height: value.f32()}, Target: value.id(), Precise: value.bool(),
 	}
 	if err := value.finish(); err != nil {
 		return gfx.ScrollEvent{}, err
@@ -495,6 +496,14 @@ func encodeCanvas(value CanvasSnapshot) ([]byte, error) {
 		result.bool(triangle.Shaded)
 		result.u16(triangle.Layer)
 		result.u8(triangle.EdgeMask)
+		result.bool(triangle.Coverage != nil)
+		if coverage := triangle.Coverage; coverage != nil {
+			for _, point := range coverage.Points {
+				result.f32(point.X)
+				result.f32(point.Y)
+			}
+			result.u8(coverage.EdgeMask)
+		}
 		encodeRect(&result, triangle.ClipOf)
 		result.bool(triangle.HasClip)
 		result.u32(triangle.Order)
@@ -634,6 +643,14 @@ func decodeCanvas(data []byte) (CanvasSnapshot, error) {
 		triangle.Shaded = value.bool()
 		triangle.Layer = value.u16()
 		triangle.EdgeMask = value.u8()
+		if value.bool() {
+			coverage := new(gfx.StrokeCoverage)
+			for point := range coverage.Points {
+				coverage.Points[point] = gfx.Point{X: value.f32(), Y: value.f32()}
+			}
+			coverage.EdgeMask = value.u8()
+			triangle.Coverage = coverage
+		}
 		triangle.ClipOf, triangle.HasClip = decodeRect(&value), value.bool()
 		triangle.Order = value.u32()
 		result.Triangles[index] = triangle

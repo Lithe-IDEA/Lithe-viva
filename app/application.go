@@ -23,6 +23,7 @@ var ErrNoWindows = errors.New("app: application opened no windows")
 // before resize/frame callbacks and repaints afterward.
 // An always-on-top host additionally implements SetAlwaysOnTop(bool) error.
 // A size-capable host additionally implements SetSize(int, int) error.
+// A watermark-capable host additionally implements SetWatermark(Watermark) error.
 // A decoration-capable host additionally implements SetDecorated(bool, func(error)) error.
 type WindowControl interface {
 	Close()
@@ -36,6 +37,8 @@ type WindowControl interface {
 // Host is the event loop an Application runs on. The native backends provide
 // one over their platform adapters; a development runner such as package
 // headless provides one to drive an application without a window.
+// A host may additionally implement ShowNotification(Notification,
+// NotificationEvents) (NotificationControl, error) for interactive notifications.
 type Host interface {
 	// OpenWindow creates and presents a window. closed must be called exactly
 	// once, after the window has released its resources.
@@ -248,8 +251,10 @@ type Application struct {
 	// active is the window that last became the one the user works in, which is
 	// where the application menu bar's commands take effect, as a native menu's
 	// key equivalents do.
-	active    *Window
-	openedAny bool
+	active              *Window
+	openedAny           bool
+	notifications       map[*NotificationHandle]struct{}
+	notificationsClosed bool
 }
 
 // OpenWindow creates and presents one independent retained window.
@@ -434,6 +439,7 @@ func (application *Application) SetProgress(fraction float32) {
 // goroutine.
 func (application *Application) Quit() {
 	if application != nil && application.host != nil {
+		application.closeNotifications()
 		application.host.Quit()
 	}
 }
