@@ -457,9 +457,16 @@ type HitOptions struct {
 	// PointerCursorImage. The same value stays the same cursor: keep one while
 	// the picture is unchanged, and make a new one when it changes.
 	CursorImage *CursorImage
-	Value       string
-	Hint        string
-	Disabled    bool
+	// CursorImageAt is the pointer shown over the hit instead of CursorImage:
+	// the runtime asks it for the picture at the pointer's place whenever the
+	// pointer moves, so a hit whose pointer depends on what is under it can
+	// follow the pointer without repainting the window. It applies only with
+	// Cursor set to PointerCursorImage, and the same value stays the same
+	// cursor, as with CursorImage.
+	CursorImageAt CursorImageFunc
+	Value         string
+	Hint          string
+	Disabled      bool
 	// FocusableWhenDisabled keeps a disabled control in the Tab order and
 	// focusable, as Base UI's accordion, collapsible and tab triggers do; it
 	// never activates. Pointer presses still skip it.
@@ -581,6 +588,20 @@ type HitOptions struct {
 	Placement TextPlacement
 }
 
+// IsZero reports whether no option is set, so a caller can tell HitWith given
+// nothing from one given options. The value cannot be compared with == for
+// that, CursorImageAt being a function.
+func (options HitOptions) IsZero() bool {
+	return options.Role == 0 && options.Cursor == 0 && options.CursorImage == nil && options.CursorImageAt == nil &&
+		options.Value == "" && options.Hint == "" && !options.Disabled && !options.FocusableWhenDisabled && !options.SecondaryWhenDisabled &&
+		!options.Checked && !options.Mixed && !options.Selected && !options.Expanded && !options.Expandable && !options.Multiline && !options.ReadOnly &&
+		!options.Invalid && !options.Secure && options.Description == "" && options.Level == 0 && options.PosInSet == 0 && options.SetSize == 0 &&
+		options.Live == 0 && options.Range == (ValueRange{}) && !options.SkipFocus && !options.SkipTab && !options.Backdrop && !options.PassSecondary &&
+		!options.PassPrimary && !options.label && !options.Presentational && !options.Autofocus &&
+		options.TextBounds == (Rect{}) && options.TextSize == 0 && options.TextWeight == 0 && options.TextColor == (Color{}) && options.TextAlignment == 0 &&
+		!options.HideNativeOverlays && !options.NavigationKeys && !options.TypeAhead && options.Placement == nil
+}
+
 // TextPlacement is what a text field that lays its own rows out tells the
 // runtime about them, painted by the last frame. Offsets are byte offsets into
 // the field's Value, which must be the text it paints.
@@ -620,7 +641,10 @@ type Hit struct {
 	Cursor PointerCursor
 	// CursorImage is HitOptions.CursorImage.
 	CursorImage *CursorImage
-	Disabled    bool
+	// CursorImageAt is one plus the index in Canvas.cursorImageAts of
+	// HitOptions.CursorImageAt, or 0 when the hit declared none.
+	CursorImageAt int32
+	Disabled      bool
 	// FocusableDisabled is HitOptions.FocusableWhenDisabled.
 	FocusableDisabled bool
 	// SecondaryWhenDisabled is HitOptions.SecondaryWhenDisabled.
@@ -710,11 +734,17 @@ type Canvas struct {
 	hoverHintSide  uint8
 	// hitTexts holds the text geometry of the hits that declared any, in
 	// declaration order; Hit.Text is one more than the entry's index.
-	hitTexts     []HitText
-	clips        []Clip
-	overlayClips []int // clip-stack baselines for floating content
-	focusScopes  []ID
-	layers       []uint16
+	hitTexts []HitText
+	// cursorImageAts holds the position-dependent pointer pictures of the hits
+	// that declared any, in declaration order; Hit.CursorImageAt is one more
+	// than the entry's index. hasCursorImageAt says whether any paint hit
+	// declared one, so the runtime knows to ask for the pointer on every move.
+	cursorImageAts   []CursorImageFunc
+	hasCursorImageAt bool
+	clips            []Clip
+	overlayClips     []int // clip-stack baselines for floating content
+	focusScopes      []ID
+	layers           []uint16
 	// order is the last paint order handed out this frame; every primitive gets
 	// the next one (see Rectangle.Order).
 	order         uint32
@@ -1047,6 +1077,8 @@ func (canvas *Canvas) Reset() {
 	canvas.hoverHints = canvas.hoverHints[:0]
 	canvas.hoverHintOwner, canvas.hoverHintSide = 0, 0
 	canvas.hitTexts = canvas.hitTexts[:0]
+	canvas.cursorImageAts = canvas.cursorImageAts[:0]
+	canvas.hasCursorImageAt = false
 	canvas.clips = canvas.clips[:0]
 	canvas.overlayClips = canvas.overlayClips[:0]
 	canvas.focusScopes = canvas.focusScopes[:0]
@@ -1096,6 +1128,7 @@ func (canvas *Canvas) Trim() {
 	releaseTail(canvas.hits, &canvas.tails.hits)
 	releaseTail(canvas.hoverHints, &canvas.tails.hoverHints)
 	releaseTail(canvas.hitTexts, &canvas.tails.hitTexts)
+	releaseTail(canvas.cursorImageAts, &canvas.tails.cursorImageAts)
 	releaseTail(canvas.nativeViews, &canvas.tails.nativeViews)
 	canvas.rectangles = trimCapacity(canvas.rectangles)
 	canvas.triangles = trimCapacity(canvas.triangles)
@@ -1107,6 +1140,7 @@ func (canvas *Canvas) Trim() {
 	canvas.hits = trimCapacity(canvas.hits)
 	canvas.hoverHints = trimCapacity(canvas.hoverHints)
 	canvas.hitTexts = trimCapacity(canvas.hitTexts)
+	canvas.cursorImageAts = trimCapacity(canvas.cursorImageAts)
 	canvas.clips = trimCapacity(canvas.clips)
 	canvas.overlayClips = trimCapacity(canvas.overlayClips)
 	canvas.focusScopes = trimCapacity(canvas.focusScopes)
@@ -1758,10 +1792,19 @@ func (canvas *Canvas) HitWithOptions(id ID, bounds Rect, label string, options H
 		})
 		text = int32(len(canvas.hitTexts))
 	}
+	// The position-dependent pointer picture lives beside the hit as well, so the
+	// hit stays comparable and a copied hit does not carry a closure.
+	var cursorAt int32
+	if options.CursorImageAt != nil {
+		canvas.cursorImageAts = append(canvas.cursorImageAts, options.CursorImageAt)
+		cursorAt = int32(len(canvas.cursorImageAts))
+		canvas.hasCursorImageAt = true
+	}
 	canvas.hits = append(canvas.hits, Hit{
 		ID: id, Bounds: bounds, Label: label,
 		Value: options.Value, Hint: options.Hint,
-		Scope: canvas.currentFocusScope(), Layer: canvas.currentLayer(), Role: role, Cursor: options.Cursor, CursorImage: options.CursorImage,
+		Scope: canvas.currentFocusScope(), Layer: canvas.currentLayer(), Role: role, Cursor: options.Cursor,
+		CursorImage: options.CursorImage, CursorImageAt: cursorAt,
 		Disabled: options.Disabled, FocusableDisabled: options.Disabled && options.FocusableWhenDisabled,
 		SecondaryWhenDisabled: options.Disabled && options.SecondaryWhenDisabled,
 		Checked:               options.Checked, Mixed: options.Mixed,
@@ -1897,6 +1940,26 @@ func (canvas *Canvas) HitText(hit *Hit) (HitText, bool) {
 // invalidated by the next Reset.
 func (canvas *Canvas) HitTexts() []HitText {
 	return canvas.hitTexts
+}
+
+// HasCursorImageAt reports whether any hit of this paint declared a
+// position-dependent pointer picture, which the runtime asks for on every
+// pointer move.
+func (canvas *Canvas) HasCursorImageAt() bool {
+	return canvas.hasCursorImageAt
+}
+
+// CursorImageAt returns the position-dependent pointer picture hit declared, or
+// nil when it declared none. hit must come from this canvas's Hits.
+func (canvas *Canvas) CursorImageAt(hit *Hit) CursorImageFunc {
+	if hit == nil || hit.CursorImageAt <= 0 {
+		return nil
+	}
+	index := int(hit.CursorImageAt) - 1
+	if index >= len(canvas.cursorImageAts) {
+		return nil
+	}
+	return canvas.cursorImageAts[index]
 }
 
 // HitBounds is the region the control with that identity has declared so far in

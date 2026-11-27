@@ -125,6 +125,10 @@ type painter struct {
 	// the hit test and read back into the next paint.
 	onSurface bool
 	cursor    Cursor
+	// pointerAt is where the last pointer event put the pointer, in page
+	// coordinates: a hit's position-dependent picture is asked for at this
+	// place, so it follows the pointer without a repaint.
+	pointerAt gfx.Point
 	scrollX   float32
 	scrollY   float32
 	// scheduleFrame asks the runtime for one more frame, after at least the
@@ -271,6 +275,7 @@ func (painter *painter) pointerInput(event platform.PointerEvent) (platform.Fram
 // pointerInputOf is pointerInput, and says in handled whether the application
 // took the press.
 func (painter *painter) pointerInputOf(event platform.PointerEvent, handled *bool) (platform.Frame, error) {
+	painter.pointerAt = gfx.Point{X: event.X, Y: event.Y}
 	if event.Kind == platform.PointerDown {
 		painter.tap.Cancel()
 		painter.pointerOutside = false
@@ -355,6 +360,11 @@ func (painter *painter) pointerInputOf(event platform.PointerEvent, handled *boo
 		!focusChanged && !result.Repaint {
 		if edgeChanged {
 			// Only the cursor differs: no repaint for it.
+			return platform.Frame{}, painter.syncCursor()
+		}
+		if painter.canvas.HasCursorImageAt() {
+			// A hit whose pointer picture depends on the pointer's place changes
+			// without a repaint, so the system is asked for it on every move.
 			return platform.Frame{}, painter.syncCursor()
 		}
 		return platform.Frame{}, nil
@@ -790,6 +800,25 @@ func (painter *painter) releaseKeys() bool {
 	return repaint
 }
 
+// endPress ends a press the platform took for itself, as it does when the
+// activation goes away or the window manager starts a drag of its own: the
+// button's release will go to whoever holds the pointer now, so the application
+// is told the pointer is gone instead of keeping a press that can never end.
+// It reports whether a press was ended, for the caller to repaint.
+func (painter *painter) endPress() bool {
+	if painter.pointer.PressTarget().IsZero() {
+		return false
+	}
+	painter.pointerOutside = false
+	painter.onSurface = false
+	painter.pointer.Exit()
+	if painter.onPointer != nil {
+		response := painter.onPointer(gfx.PointerEvent{Kind: gfx.PointerExit, Viewport: painter.size})
+		painter.applyEventResult(response)
+	}
+	return true
+}
+
 // focusLostHandler is what a window hands the platform for the loss of the
 // keyboard: it releases the keys that were down, since their releases will go
 // to whatever window has the keyboard now, and tells the application.
@@ -813,6 +842,11 @@ func (painter *painter) deactivateHandler() platform.DeactivateHandler {
 func (painter *painter) deactivate() (platform.Frame, error) {
 	painter.tap.Cancel()
 	repaint := painter.releaseKeys()
+	// The activation takes the pointer too: a press that was down belongs to
+	// whoever has the pointer now, and its release will never reach this window.
+	if painter.endPress() {
+		repaint = true
+	}
 	if painter.onDeactivate != nil {
 		response := painter.onDeactivate()
 		repaint = painter.applyEventResult(response) || response.Repaint || repaint
@@ -826,6 +860,11 @@ func (painter *painter) deactivate() (platform.Frame, error) {
 func (painter *painter) focusLost() (platform.Frame, error) {
 	painter.tap.Cancel()
 	repaint := painter.releaseKeys()
+	// A window manager's grab (Alt+Tab, a compositor gesture) takes the
+	// pointer's release with the keyboard's, so a press it interrupts ends here.
+	if painter.endPress() {
+		repaint = true
+	}
 	if painter.onFocusLost != nil {
 		response := painter.onFocusLost()
 		repaint = painter.applyEventResult(response) || response.Repaint || repaint
@@ -1275,7 +1314,7 @@ func (painter *painter) syncCursor() error {
 	if painter.edge != platform.EdgeNone && painter.pointer.PressTarget().IsZero() {
 		return painter.applyCursor(cursorForEdge(painter.edge), nil)
 	}
-	if cursor, picture := interaction.CursorForTarget(painter.canvas.Hits(), painter.pointer.Hovered(), painter.pointer.PressTarget()); cursor != gfx.PointerCursorDefault || picture != nil {
+	if cursor, picture := interaction.CursorForTarget(painter.canvas, painter.pointer.Hovered(), painter.pointer.PressTarget(), painter.pointerAt); cursor != gfx.PointerCursorDefault || picture != nil {
 		next, image = cursorFromHit(cursor), picture
 	}
 	return painter.applyCursor(next, image)
